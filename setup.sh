@@ -308,6 +308,10 @@ setup_node() {
     iptables-save > /etc/iptables/rules.v4
     success "Порты закрыты, доступны только с $PANEL_IP"
 
+    info "Устанавливаем команду balancer..."
+    curl -4 -Ls "$BASE_URL/balancer.sh" -o /usr/local/bin/balancer
+    chmod +x /usr/local/bin/balancer
+
     NODE_IP=$(curl -s --max-time 3 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 
     echo ""

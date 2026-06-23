@@ -9,19 +9,6 @@ BASE_URL="https://raw.githubusercontent.com/FnoUp/balancer_installer/master"
 ADD_NODE_PY="/tmp/add_node.py"
 TARGETS_DIR="/etc/prometheus/targets"
 
-# Читаем конфиг, созданный setup.sh
-CONFIG_FILE="/etc/vpn-balancer/config"
-if [ -f "$CONFIG_FILE" ]; then
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
-else
-    SVC_NAME="vpn-balancer"
-fi
-
-BALANCER_PY="/opt/$SVC_NAME/balancer.py"
-BALANCER_SVC="$SVC_NAME"
-BALANCER_LOG="/var/log/$SVC_NAME/balancer.log"
-
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
 
@@ -36,6 +23,80 @@ svc_status() {
 
 pause() { read -rp "  Нажми Enter чтобы вернуться в меню..."; }
 
+# ── Определяем режим: панель или нода ─────────────────────────
+CONFIG_FILE="/etc/vpn-balancer/config"
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+    IS_PANEL=true
+else
+    IS_PANEL=false
+fi
+
+BALANCER_PY="/opt/${SVC_NAME:-vpn-balancer}/balancer.py"
+BALANCER_SVC="${SVC_NAME:-vpn-balancer}"
+BALANCER_LOG="/var/log/${SVC_NAME:-vpn-balancer}/balancer.log"
+
+# ══════════════════════════════════════════════════════════════
+# МЕНЮ НОДЫ
+# ══════════════════════════════════════════════════════════════
+show_menu_node() {
+    clear
+    echo ""
+    echo -e "  ${BOLD}╔══════════════════════════════════════╗${NC}"
+    echo -e "  ${BOLD}║     VPN Balancer — нода              ║${NC}"
+    echo -e "  ${BOLD}╚══════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  node_exporter  $(svc_status prometheus-node-exporter)"
+    echo -e "  cAdvisor       $(docker ps --filter name=cadvisor --format '●' 2>/dev/null | grep -q '●' && echo -e "${GREEN}● работает${NC}" || echo -e "${RED}● остановлен${NC}")"
+    echo ""
+    echo -e "  ${DIM}── Управление ────────────────────────────${NC}"
+    echo -e "  ${BLUE}1)${NC} Перезапустить node_exporter"
+    echo -e "  ${BLUE}2)${NC} Перезапустить cAdvisor"
+    echo -e "  ${BLUE}3)${NC} Показать iptables (порты 9100/8080)"
+    echo -e "  ${BLUE}4)${NC} Обновить команду balancer"
+    echo ""
+    echo -e "  ${DIM}0) Выйти${NC}"
+    echo ""
+    read -rp "  Выбор: " choice
+    echo ""
+    handle_node "$choice"
+}
+
+handle_node() {
+    case "$1" in
+    1)
+        systemctl restart prometheus-node-exporter \
+            && echo -e "  ${GREEN}[OK]${NC} node_exporter перезапущен" \
+            || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
+        sleep 1; show_menu_node
+        ;;
+    2)
+        docker restart cadvisor 2>/dev/null \
+            && echo -e "  ${GREEN}[OK]${NC} cAdvisor перезапущен" \
+            || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
+        sleep 1; show_menu_node
+        ;;
+    3)
+        echo -e "  ${BOLD}Правила iptables для метрик:${NC}"
+        echo ""
+        iptables -L INPUT -n --line-numbers | grep -E "9100|8080" || echo "  Правил не найдено"
+        echo ""
+        pause; show_menu_node
+        ;;
+    4)
+        curl -4 -Ls "$BASE_URL/balancer.sh" -o /usr/local/bin/balancer && chmod +x /usr/local/bin/balancer \
+            && echo -e "  ${GREEN}[OK]${NC} balancer обновлён" \
+            || echo -e "  ${RED}[ERROR]${NC} Не удалось обновить"
+        pause; show_menu_node
+        ;;
+    0) echo ""; exit 0 ;;
+    *) show_menu_node ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════
+# МЕНЮ ПАНЕЛИ
 # ══════════════════════════════════════════════════════════════
 show_menu() {
     clear
@@ -67,7 +128,6 @@ show_menu() {
     handle "$choice"
 }
 
-# ══════════════════════════════════════════════════════════════
 handle() {
     case "$1" in
 
@@ -89,10 +149,10 @@ handle() {
     # ── 2. Переустановить с нуля ────────────────────────────────
     2)
         echo -e "  ${RED}Будет удалено:${NC}"
-        echo -e "    /opt/$SVC_NAME/"
-        echo -e "    /etc/systemd/system/$SVC_NAME.service"
+        echo -e "    /opt/$BALANCER_SVC/"
+        echo -e "    /etc/systemd/system/$BALANCER_SVC.service"
         echo -e "    $TARGETS_DIR/*.yml"
-        echo -e "    /var/log/$SVC_NAME/"
+        echo -e "    /var/log/$BALANCER_SVC/"
         echo -e "    /etc/vpn-balancer/config"
         echo -e "    /tmp/add_node.py"
         echo -e "    /usr/local/bin/balancer"
@@ -101,10 +161,10 @@ handle() {
         echo ""
         read -rp "  Подтвердить? (yes/n): " CONFIRM
         if [ "$CONFIRM" = "yes" ]; then
-            systemctl stop "$BALANCER_SVC"  2>/dev/null || true
+            systemctl stop "$BALANCER_SVC"    2>/dev/null || true
             systemctl disable "$BALANCER_SVC" 2>/dev/null || true
-            rm -rf "/opt/$SVC_NAME" "/var/log/$SVC_NAME" /tmp/add_node.py /etc/vpn-balancer
-            rm -f "/etc/systemd/system/$SVC_NAME.service" /usr/local/bin/balancer
+            rm -rf "/opt/$BALANCER_SVC" "/var/log/$BALANCER_SVC" /tmp/add_node.py /etc/vpn-balancer
+            rm -f "/etc/systemd/system/$BALANCER_SVC.service" /usr/local/bin/balancer
             rm -f "$TARGETS_DIR"/vpn_nodes.yml "$TARGETS_DIR"/docker.yml "$TARGETS_DIR"/ping.yml
             systemctl daemon-reload
             echo -e "  ${GREEN}[OK]${NC} Файлы удалены"
@@ -136,7 +196,7 @@ handle() {
     # ── 4. Статус нод ───────────────────────────────────────────
     4)
         python3 - "$BALANCER_PY" << 'PYEOF'
-import re, subprocess, sys
+import re, sys
 
 BALANCER_PY = sys.argv[1] if len(sys.argv) > 1 else "/opt/vpn-balancer/balancer.py"
 
@@ -147,7 +207,6 @@ except FileNotFoundError:
     print("  balancer.py не найден")
     sys.exit(0)
 
-# Парсим NODES из файла
 nodes_raw = re.findall(
     r'\{[^}]*"name"\s*:\s*"([^"]+)"[^}]*"host_uuid"\s*:\s*"([^"]+)"[^}]*"prom_instance"\s*:\s*"([^"]+)"[^}]*\}',
     content, re.DOTALL
@@ -162,17 +221,14 @@ if not nodes_raw:
     print("  Ноды не найдены в balancer.py (список NODES пуст)")
     sys.exit(0)
 
-print(f"\n  {'Нода':<20} {'Prometheus':<25} Статус в файле")
+print(f"\n  {'Нода':<20} {'Prometheus':<25} Статус")
 print("  " + "─" * 60)
 for name, uuid, prom in nodes_raw:
-    # Проверяем доступность метрики
     try:
-        import urllib.request
+        import urllib.request, json
         url = f"http://localhost:9090/api/v1/query?query=up{{instance='{prom}'}}"
         with urllib.request.urlopen(url, timeout=3) as r:
-            import json
-            data = json.loads(r.read())
-            results = data.get("data", {}).get("result", [])
+            results = json.loads(r.read()).get("data", {}).get("result", [])
             status = "UP" if results and results[0]["value"][1] == "1" else "DOWN"
     except:
         status = "?"
@@ -182,7 +238,7 @@ for name, uuid, prom in nodes_raw:
 print()
 PYEOF
         echo ""
-        read -rp "  r = обновить данные, Enter = в меню: " SUB
+        read -rp "  r = обновить, Enter = в меню: " SUB
         if [ "$SUB" = "r" ]; then handle 4; else show_menu; fi
         ;;
 
@@ -219,4 +275,9 @@ PYEOF
     esac
 }
 
-show_menu
+# ── Запуск нужного меню ────────────────────────────────────────
+if [ "$IS_PANEL" = true ]; then
+    show_menu
+else
+    show_menu_node
+fi
