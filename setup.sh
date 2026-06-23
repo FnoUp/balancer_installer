@@ -103,8 +103,9 @@ setup_panel() {
     info "Reports Chat:  $TG_REP_CHAT (topic: $TG_REP_TOP)"
     echo "  ───────────────────────────────────────────────────────"
     echo ""
-    read -rp "  Всё верно? (y/n): " CONFIRM
-    [[ "$CONFIRM" != "y" ]] && { echo "Отмена."; exit 0; }
+    read -rp "  Всё верно? (y = установить, n = ввести заново, q = выйти): " CONFIRM
+    [[ "$CONFIRM" == "q" ]] && { echo "Выход."; exit 0; }
+    [[ "$CONFIRM" != "y" ]] && { echo ""; setup_panel; return; }
 
     INSTALL_DIR="/opt/$SVC_NAME"
     LOG_DIR="/var/log/$SVC_NAME"
@@ -241,8 +242,9 @@ setup_node() {
     info "Панель:     $PANEL_IP"
     info "Интерфейс:  $NET_DEV"
     echo ""
-    read -rp "  Всё верно? (y/n): " CONFIRM
-    [[ "$CONFIRM" != "y" ]] && { echo "Отмена."; exit 0; }
+    read -rp "  Всё верно? (y = установить, n = ввести заново, q = выйти): " CONFIRM
+    [[ "$CONFIRM" == "q" ]] && { echo "Выход."; exit 0; }
+    [[ "$CONFIRM" != "y" ]] && { echo ""; setup_node; return; }
     echo ""
 
     info "Обновляем пакеты..."
@@ -277,7 +279,7 @@ setup_node() {
         || error "cAdvisor не запустился"
 
     info "Закрываем порты метрик..."
-    apt-get install -y iptables-persistent
+    DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
     iptables -D INPUT -p tcp --dport 9100 -j DROP 2>/dev/null || true
     iptables -D INPUT -p tcp --dport 8080 -j DROP 2>/dev/null || true
     iptables -I INPUT -p tcp --dport 9100 ! -s "$PANEL_IP" -j DROP

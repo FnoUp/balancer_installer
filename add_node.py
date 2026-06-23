@@ -19,13 +19,15 @@ TARGETS_DIR = "/etc/prometheus/targets"
 
 # Читаем конфиг, созданный setup.sh
 SVC_NAME = "vpn-balancer"
+BALANCER_TAG = "BALANCER"
 _config = "/etc/vpn-balancer/config"
 if os.path.exists(_config):
     with open(_config) as _f:
         for _line in _f:
             if _line.startswith("SVC_NAME="):
                 SVC_NAME = _line.strip().split("=", 1)[1]
-                break
+            elif _line.startswith("BALANCER_TAG="):
+                BALANCER_TAG = _line.strip().split("=", 1)[1]
 
 BALANCER_FILE = f"/opt/{SVC_NAME}/balancer.py"
 BALANCER_LOG  = f"/var/log/{SVC_NAME}/balancer.log"
@@ -55,6 +57,33 @@ def run(cmd):
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     return result.returncode == 0, result.stdout, result.stderr
 
+def rw_get_host_remark(uuid):
+    """Получаем remark хоста из Remnawave по UUID"""
+    try:
+        with open(BALANCER_FILE) as f:
+            content = f.read()
+        api  = re.search(r'REMNAWAVE_API\s*=\s*"([^"]+)"', content)
+        tok  = re.search(r'REMNAWAVE_TOKEN\s*=\s*"([^"]+)"', content)
+        cook = re.search(r'REMNAWAVE_COOKIE\s*=\s*"([^"]+)"', content)
+        if not api or not tok:
+            return None
+        import urllib.request, json
+        req = urllib.request.Request(
+            f"{api.group(1)}/hosts",
+            headers={
+                "Authorization": f"Bearer {tok.group(1)}",
+                **({"Cookie": cook.group(1)} if cook and cook.group(1) else {}),
+            }
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            hosts = json.loads(r.read()).get("response", [])
+            host = next((h for h in hosts if h.get("uuid") == uuid), None)
+            if host:
+                return host.get("remark") or host.get("address") or host.get("name")
+    except Exception:
+        pass
+    return None
+
 # ── Проверки ──────────────────────────────────────────────────
 if os.geteuid() != 0:
     error("Запусти от root: sudo python3 add_node.py")
@@ -72,7 +101,7 @@ print("   Добавление новой ноды в мониторинг")
 print("=" * 50)
 print()
 print("Данные нужно взять из:")
-print("  - IP ноды: вывод node_setup.sh")
+print("  - IP ноды: вывод setup.sh (пункт 2 — установка на ноду)")
 print("  - UUID хоста: Remnawave → Hosts → нужный хост → UUID")
 print()
 
@@ -85,6 +114,8 @@ while True:
     node_ip = ask("IP адрес ноды")
     if not node_ip:
         print("IP не может быть пустым"); continue
+    if not re.match(r'^\d{1,3}(\.\d{1,3}){3}$', node_ip):
+        print("Некорректный IP адрес"); continue
 
     location = ask("Локация (например: france, sweden, germany)")
     if not location:
@@ -96,8 +127,14 @@ while True:
     if not host_uuid:
         print("UUID не может быть пустым"); continue
 
-    # Название для TG = название ноды (можно переопределить)
-    tg_name = ask("Название для Telegram алертов", node_name)
+    # Получаем remark из Remnawave автоматически
+    rw_remark = rw_get_host_remark(host_uuid)
+    if rw_remark:
+        tg_name = rw_remark
+        success(f"Имя из Remnawave: {tg_name}")
+    else:
+        tg_name = node_name
+        warn(f"Не удалось получить remark из Remnawave, используем: {tg_name}")
 
     print()
     print("─" * 50)
@@ -112,7 +149,6 @@ while True:
 
     confirm = input("Всё верно? (y = добавить, n = ввести заново, q = выйти): ").strip().lower()
     if confirm == "y":
-        emoji_name = tg_name
         break
     elif confirm == "q":
         print("Отмена.")
@@ -186,7 +222,7 @@ success(f"Добавлено в {PING_YML}")
 info("Добавляем ноду в balancer.py...")
 
 new_node_code = f"""    {{
-        "name":          "{emoji_name}",
+        "name":          "{tg_name}",
         "host_uuid":     "{host_uuid}",
         "prom_instance": "{node_ip}:9100",
         "ping_instance": "{node_ip}",
@@ -245,7 +281,5 @@ print("Проверь через 1-2 минуты:")
 print(f"  Prometheus targets: http://localhost:9090/targets")
 print(f"  Балансировщик:      tail -f {BALANCER_LOG}")
 print()
-print("Не забудь в Remnawave:")
-print("  1. Убедись что хост France/Sweden видимый")
-print("  2. Балансировщик сам проставит тег BALANCER когда нода здорова")
+print(f"Тег {BALANCER_TAG} балансировщик проставит автоматически когда нода здорова.")
 print()
