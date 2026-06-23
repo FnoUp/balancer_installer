@@ -48,13 +48,22 @@ show_menu_node() {
     echo -e "  ${BOLD}╚══════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  node_exporter  $(svc_status prometheus-node-exporter)"
-    echo -e "  cAdvisor       $(docker ps --filter name=cadvisor --format '●' 2>/dev/null | grep -q '●' && echo -e "${GREEN}● работает${NC}" || echo -e "${RED}● остановлен${NC}")"
+    echo -e "  cAdvisor       $(docker ps --filter name=cadvisor --format '●' 2>/dev/null | grep -q '●' \
+        && echo -e "${GREEN}● работает${NC}" || echo -e "${RED}● остановлен${NC}")"
+    echo ""
+    echo -e "  ${DIM}── Установка ─────────────────────────────${NC}"
+    echo -e "  ${BLUE}1)${NC} Переустановить ноду с нуля"
+    echo -e "       ${DIM}(удалит: node_exporter, cAdvisor, iptables, balancer)${NC}"
+    echo -e "       ${DIM}(оставит: Docker)${NC}"
     echo ""
     echo -e "  ${DIM}── Управление ────────────────────────────${NC}"
-    echo -e "  ${BLUE}1)${NC} Перезапустить node_exporter"
-    echo -e "  ${BLUE}2)${NC} Перезапустить cAdvisor"
-    echo -e "  ${BLUE}3)${NC} Показать iptables (порты 9100/8080)"
-    echo -e "  ${BLUE}4)${NC} Обновить команду balancer"
+    echo -e "  ${BLUE}2)${NC} Перезапустить node_exporter"
+    echo -e "       ${DIM}(сборщик метрик CPU, RAM, диска, сети)${NC}"
+    echo -e "  ${BLUE}3)${NC} Перезапустить cAdvisor"
+    echo -e "       ${DIM}(сборщик метрик Docker-контейнеров)${NC}"
+    echo -e "  ${BLUE}4)${NC} Firewall метрик — кто видит порты 9100/8080"
+    echo -e "       ${DIM}(должна быть только панель)${NC}"
+    echo -e "  ${BLUE}5)${NC} Обновить команду balancer"
     echo ""
     echo -e "  ${DIM}0) Выйти${NC}"
     echo ""
@@ -65,26 +74,60 @@ show_menu_node() {
 
 handle_node() {
     case "$1" in
+    # ── 1. Переустановить ноду ──────────────────────────────────
     1)
+        echo -e "  ${RED}Будет удалено:${NC}"
+        echo -e "    node_exporter (systemd сервис)"
+        echo -e "    cAdvisor (docker контейнер)"
+        echo -e "    iptables правила для портов 9100/8080"
+        echo -e "    /usr/local/bin/balancer"
+        echo ""
+        echo -e "  ${YELLOW}Docker — не трогаем${NC}"
+        echo ""
+        read -rp "  Подтвердить? (yes/n): " CONFIRM
+        if [ "$CONFIRM" = "yes" ]; then
+            systemctl stop prometheus-node-exporter 2>/dev/null || true
+            systemctl disable prometheus-node-exporter 2>/dev/null || true
+            apt-get remove -y prometheus-node-exporter 2>/dev/null || true
+            docker rm -f cadvisor 2>/dev/null || true
+            iptables -D INPUT -p tcp --dport 9100 -j DROP 2>/dev/null || true
+            iptables -D INPUT -p tcp --dport 8080 -j DROP 2>/dev/null || true
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+            rm -f /usr/local/bin/balancer
+            echo -e "  ${GREEN}[OK]${NC} Нода очищена"
+            echo ""
+            echo -e "  Установить заново: bash <(curl -4 -Ls \"$BASE_URL/setup.sh\")"
+            exit 0
+        else
+            echo "  Отмена."
+            pause; show_menu_node
+        fi
+        ;;
+    # ── 2. Перезапустить node_exporter ──────────────────────────
+    2)
         systemctl restart prometheus-node-exporter \
             && echo -e "  ${GREEN}[OK]${NC} node_exporter перезапущен" \
             || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
         sleep 1; show_menu_node
         ;;
-    2)
+    # ── 3. Перезапустить cAdvisor ───────────────────────────────
+    3)
         docker restart cadvisor 2>/dev/null \
             && echo -e "  ${GREEN}[OK]${NC} cAdvisor перезапущен" \
             || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
         sleep 1; show_menu_node
         ;;
-    3)
-        echo -e "  ${BOLD}Правила iptables для метрик:${NC}"
+    # ── 4. Firewall ─────────────────────────────────────────────
+    4)
+        echo -e "  ${BOLD}Правила firewall для портов метрик:${NC}"
         echo ""
-        iptables -L INPUT -n --line-numbers | grep -E "9100|8080" || echo "  Правил не найдено"
+        iptables -L INPUT -n --line-numbers | grep -E "9100|8080" \
+            || echo -e "  ${YELLOW}Правил не найдено — порты открыты для всех!${NC}"
         echo ""
         pause; show_menu_node
         ;;
-    4)
+    # ── 5. Обновить balancer ────────────────────────────────────
+    5)
         curl -4 -Ls "$BASE_URL/balancer.sh" -o /usr/local/bin/balancer && chmod +x /usr/local/bin/balancer \
             && echo -e "  ${GREEN}[OK]${NC} balancer обновлён" \
             || echo -e "  ${RED}[ERROR]${NC} Не удалось обновить"
