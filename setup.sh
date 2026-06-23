@@ -4,7 +4,7 @@
 #  Запуск: bash <(curl -4 -Ls "https://raw.githubusercontent.com/FnoUp/vps_installer/main/setup.sh")
 # ============================================================
 
-BASE_URL="https://raw.githubusercontent.com/FnoUp/balancer_installer/main"
+BASE_URL="https://raw.githubusercontent.com/FnoUp/balancer_installer/master"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'

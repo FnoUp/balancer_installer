@@ -5,7 +5,7 @@
 #  Использование: balancer
 # ============================================================
 
-BASE_URL="https://raw.githubusercontent.com/FnoUp/balancer_installer/main"
+BASE_URL="https://raw.githubusercontent.com/FnoUp/balancer_installer/master"
 ADD_NODE_PY="/tmp/add_node.py"
 TARGETS_DIR="/etc/prometheus/targets"
 
