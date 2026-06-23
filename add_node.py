@@ -49,7 +49,7 @@ def warn(msg):    print(f"{Y}[WARN]{NC} {msg}")
 def error(msg):   print(f"{R}[ERROR]{NC} {msg}"); sys.exit(1)
 
 def ask(prompt, default=""):
-    suffix = f" [{default}]" if default else ""
+    suffix = f" (Enter = {default})" if default else ""
     val = input(f"{prompt}{suffix}: ").strip()
     return val if val else default
 

@@ -38,7 +38,7 @@ setup_panel() {
     BALANCER_NAME="${BALANCER_NAME:-vpn-balancer}"
     SVC_NAME=$(echo "$BALANCER_NAME" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
 
-    read -rp "  Тег в Remnawave (Enter = BALANCER): " BALANCER_TAG
+    read -rp "  Тег в Remnawave    (Enter = BALANCER): " BALANCER_TAG
     BALANCER_TAG="${BALANCER_TAG:-BALANCER}"
     echo ""
     success "Сервис:  $SVC_NAME"
@@ -72,11 +72,13 @@ setup_panel() {
     [ -z "$TG_REP_CHAT" ] && { read -rp "  TG Reports Chat ID: " TG_REP_CHAT; }
     [ -z "$TG_REP_TOP"  ] && { read -rp "  TG Reports Topic ID: " TG_REP_TOP; }
 
-    # ── Отдельный чат метрик балансировщика ───────────────────
+    # ── Топик метрик балансировщика (чат тот же что у бота) ───
     echo ""
-    echo -e "  ${YELLOW}Создай отдельный чат/топик в Telegram только для балансировщика${NC}"
-    read -rp "  Metrics Chat ID: " TG_MET_CHAT
-    read -rp "  Metrics Topic ID (0 если без топиков): " TG_MET_TOP
+    TG_MET_CHAT="$TG_ERR_CHAT"
+    [ -n "$TG_MET_CHAT" ] && success "Metrics Chat ID: $TG_MET_CHAT (тот же чат, что у бота)"
+    [ -z "$TG_MET_CHAT" ] && { read -rp "  Metrics Chat ID: " TG_MET_CHAT; }
+    echo -e "  ${YELLOW}Укажи топик для алертов балансировщика (создай отдельный топик в этом чате)${NC}"
+    read -rp "  Metrics Topic ID (Enter = 0, без топика): " TG_MET_TOP
     TG_MET_TOP="${TG_MET_TOP:-0}"
 
     # ── Remnawave API токен ────────────────────────────────────
@@ -218,7 +220,7 @@ setup_node() {
         NET_DEV="${IFACES[0]}"
         IFACE_IP=$(ip -4 addr show "$NET_DEV" 2>/dev/null | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | head -1)
         info "Найден интерфейс: ${YELLOW}$NET_DEV${NC} (IP: ${IFACE_IP:-нет IP})"
-        read -rp "  Использовать его? (Enter = да, или введи другой): " NET_DEV_INPUT
+        read -rp "  Использовать его? (Enter = $NET_DEV, или введи другой): " NET_DEV_INPUT
         NET_DEV="${NET_DEV_INPUT:-$NET_DEV}"
     else
         echo ""
