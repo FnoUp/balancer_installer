@@ -90,8 +90,7 @@ setup_panel() {
     RW_COOKIE=""
     NGINX_CONF=$(find /opt/remnawave -name "*.conf" 2>/dev/null | head -1)
     if [ -n "$NGINX_CONF" ]; then
-        # Исключаем кавычки, точки с запятой и пробелы из значения
-        COOKIE_VAL=$(grep -oP 'tufLczDD=\K[^"\';\s]+' "$NGINX_CONF" 2>/dev/null | head -1)
+        COOKIE_VAL=$(grep -o 'tufLczDD=[A-Za-z0-9_.+/=-]*' "$NGINX_CONF" 2>/dev/null | head -1 | cut -d= -f2-)
         [ -n "$COOKIE_VAL" ] && RW_COOKIE="tufLczDD=$COOKIE_VAL" && success "Cookie найдена автоматически"
     fi
     if [ -z "$RW_COOKIE" ]; then
@@ -125,6 +124,10 @@ setup_panel() {
     curl -4 -Ls --max-time 30 "$BASE_URL/balancer_template.py" -o "$INSTALL_DIR/balancer.py" \
         || error "Не удалось скачать balancer_template.py с GitHub"
     [ ! -s "$INSTALL_DIR/balancer.py" ] && error "Скачанный файл пустой — проверь URL в BASE_URL"
+
+    info "Проверяем python3..."
+    command -v python3 &>/dev/null || apt-get install -y python3
+    python3 -c "import requests" 2>/dev/null || apt-get install -y python3-requests
 
     info "Заполняем конфиг..."
     # Python-подстановка безопасна для любых символов в значениях (кавычки, слэши, &)
@@ -186,10 +189,6 @@ EOF
     systemctl enable "$SVC_NAME"
     systemctl start "$SVC_NAME"
 
-    info "Проверяем python3 и зависимости..."
-    command -v python3 &>/dev/null || apt-get install -y python3
-    python3 -c "import requests" 2>/dev/null || apt-get install -y python3-requests
-
     info "Сохраняем конфиг балансировщика..."
     mkdir -p /etc/vpn-balancer
     cat > /etc/vpn-balancer/config << EOF
@@ -237,7 +236,7 @@ setup_node() {
         NET_DEV="eth0"
     elif [ "${#IFACES[@]}" -eq 1 ]; then
         NET_DEV="${IFACES[0]}"
-        IFACE_IP=$(ip -4 addr show "$NET_DEV" 2>/dev/null | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | head -1)
+        IFACE_IP=$(ip -4 addr show "$NET_DEV" 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
         info "Найден интерфейс: ${YELLOW}$NET_DEV${NC} (IP: ${IFACE_IP:-нет IP})"
         read -rp "  Использовать его? (Enter = $NET_DEV, или введи другой): " NET_DEV_INPUT
         NET_DEV="${NET_DEV_INPUT:-$NET_DEV}"
@@ -246,7 +245,7 @@ setup_node() {
         info "Найдено несколько интерфейсов:"
         for i in "${!IFACES[@]}"; do
             IFACE="${IFACES[$i]}"
-            IFACE_IP=$(ip -4 addr show "$IFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | head -1)
+            IFACE_IP=$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
             echo "    $((i+1))) $IFACE   ${IFACE_IP:-нет IP}"
         done
         echo ""
