@@ -90,10 +90,15 @@ setup_panel() {
     RW_COOKIE=""
     NGINX_CONF=$(find /opt/remnawave -name "*.conf" 2>/dev/null | head -1)
     if [ -n "$NGINX_CONF" ]; then
-        COOKIE_VAL=$(grep -oP 'tufLczDD=\K\S+' "$NGINX_CONF" 2>/dev/null | head -1)
+        # Исключаем кавычки, точки с запятой и пробелы из значения
+        COOKIE_VAL=$(grep -oP 'tufLczDD=\K[^"\';\s]+' "$NGINX_CONF" 2>/dev/null | head -1)
         [ -n "$COOKIE_VAL" ] && RW_COOKIE="tufLczDD=$COOKIE_VAL" && success "Cookie найдена автоматически"
     fi
-    [ -z "$RW_COOKIE" ] && read -rp "  Cookie (tufLczDD=..., Enter если не нужна): " RW_COOKIE
+    if [ -z "$RW_COOKIE" ]; then
+        read -rp "  Cookie (tufLczDD=..., Enter если не нужна): " RW_COOKIE
+        # Снимаем случайные кавычки если пользователь скопировал с ними
+        RW_COOKIE=$(echo "$RW_COOKIE" | tr -d '"' | tr -d "'")
+    fi
 
     # ── Подтверждение ──────────────────────────────────────────
     echo ""
@@ -122,21 +127,35 @@ setup_panel() {
     [ ! -s "$INSTALL_DIR/balancer.py" ] && error "Скачанный файл пустой — проверь URL в BASE_URL"
 
     info "Заполняем конфиг..."
-    sed -i \
-        -e "s|%%BALANCER_NAME%%|$BALANCER_NAME|g" \
-        -e "s|%%BALANCER_TAG%%|$BALANCER_TAG|g" \
-        -e "s|%%SVC_NAME%%|$SVC_NAME|g" \
-        -e "s|%%DOMAIN%%|$DOMAIN|g" \
-        -e "s|%%RW_TOKEN%%|$RW_TOKEN|g" \
-        -e "s|%%RW_COOKIE%%|$RW_COOKIE|g" \
-        -e "s|%%TG_TOKEN%%|$TG_TOKEN|g" \
-        -e "s|%%TG_METRICS_CHAT%%|$TG_MET_CHAT|g" \
-        -e "s|%%TG_METRICS_TOPIC%%|$TG_MET_TOP|g" \
-        -e "s|%%TG_ERRORS_CHAT%%|$TG_ERR_CHAT|g" \
-        -e "s|%%TG_ERRORS_TOPIC%%|$TG_ERR_TOP|g" \
-        -e "s|%%TG_REP_CHAT%%|$TG_REP_CHAT|g" \
-        -e "s|%%TG_REP_TOPIC%%|$TG_REP_TOP|g" \
-        "$INSTALL_DIR/balancer.py"
+    # Python-подстановка безопасна для любых символов в значениях (кавычки, слэши, &)
+    P_FILE="$INSTALL_DIR/balancer.py" \
+    P_BALANCER_NAME="$BALANCER_NAME" P_BALANCER_TAG="$BALANCER_TAG" P_SVC_NAME="$SVC_NAME" \
+    P_DOMAIN="$DOMAIN" P_RW_TOKEN="$RW_TOKEN" P_RW_COOKIE="$RW_COOKIE" P_TG_TOKEN="$TG_TOKEN" \
+    P_TG_METRICS_CHAT="$TG_MET_CHAT" P_TG_METRICS_TOPIC="$TG_MET_TOP" \
+    P_TG_ERRORS_CHAT="$TG_ERR_CHAT" P_TG_ERRORS_TOPIC="$TG_ERR_TOP" \
+    P_TG_REP_CHAT="$TG_REP_CHAT"    P_TG_REP_TOPIC="$TG_REP_TOP" \
+    python3 << 'PYEOF'
+import os
+f = os.environ["P_FILE"]
+content = open(f).read()
+for ph, env in [
+    ("%%BALANCER_NAME%%",    "P_BALANCER_NAME"),
+    ("%%BALANCER_TAG%%",     "P_BALANCER_TAG"),
+    ("%%SVC_NAME%%",         "P_SVC_NAME"),
+    ("%%DOMAIN%%",           "P_DOMAIN"),
+    ("%%RW_TOKEN%%",         "P_RW_TOKEN"),
+    ("%%RW_COOKIE%%",        "P_RW_COOKIE"),
+    ("%%TG_TOKEN%%",         "P_TG_TOKEN"),
+    ("%%TG_METRICS_CHAT%%",  "P_TG_METRICS_CHAT"),
+    ("%%TG_METRICS_TOPIC%%", "P_TG_METRICS_TOPIC"),
+    ("%%TG_ERRORS_CHAT%%",   "P_TG_ERRORS_CHAT"),
+    ("%%TG_ERRORS_TOPIC%%",  "P_TG_ERRORS_TOPIC"),
+    ("%%TG_REP_CHAT%%",      "P_TG_REP_CHAT"),
+    ("%%TG_REP_TOPIC%%",     "P_TG_REP_TOPIC"),
+]:
+    content = content.replace(ph, os.environ.get(env, ""))
+open(f, "w").write(content)
+PYEOF
 
     info "Создаём targets файлы..."
     for f in vpn_nodes.yml docker.yml ping.yml; do

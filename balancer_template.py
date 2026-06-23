@@ -212,7 +212,7 @@ def check_node(node, nodes_in_pool):
                 f"Score: <code>{score}</code>\n<code>{detail}</code>"
             )
             return
-        if set_host_tag(uuid, None):
+        if set_host_tag(uuid, ""):
             node_state[uuid] = False
             log.warning(f"{name}: ВЫВЕДЕНА из пула | score={score}")
             tg_metrics(f"🔴 <b>VPN Balancer — нода выведена</b>\nНода: <b>{name}</b>\nScore: <code>{score}</code> (порог {SCORE_BAD})\n<code>{detail}</code>")
