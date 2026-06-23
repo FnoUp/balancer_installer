@@ -90,14 +90,14 @@ handle_node() {
             systemctl disable prometheus-node-exporter 2>/dev/null || true
             apt-get remove -y prometheus-node-exporter 2>/dev/null || true
             docker rm -f cadvisor 2>/dev/null || true
-            iptables -D INPUT -p tcp --dport 9100 -j DROP 2>/dev/null || true
-            iptables -D INPUT -p tcp --dport 8080 -j DROP 2>/dev/null || true
+            # Удаляем все правила для портов 9100/8080 (и DROP, и ACCEPT)
+            while iptables -D INPUT -p tcp --dport 9100 2>/dev/null; do :; done
+            while iptables -D INPUT -p tcp --dport 8080 2>/dev/null; do :; done
             iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
             rm -f /usr/local/bin/balancer
             echo -e "  ${GREEN}[OK]${NC} Нода очищена"
             echo ""
-            echo -e "  Установить заново: bash <(curl -4 -Ls \"$BASE_URL/setup.sh\")"
-            exit 0
+            exec bash <(curl -4 -Ls "$BASE_URL/setup.sh")
         else
             echo "  Отмена."
             pause; show_menu_node
@@ -212,8 +212,7 @@ handle() {
             systemctl daemon-reload
             echo -e "  ${GREEN}[OK]${NC} Файлы удалены"
             echo ""
-            echo -e "  Запусти заново: bash <(curl -4 -Ls \"$BASE_URL/setup.sh\")"
-            exit 0
+            exec bash <(curl -4 -Ls "$BASE_URL/setup.sh")
         else
             echo "  Отмена."
             pause; show_menu

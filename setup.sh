@@ -117,6 +117,14 @@ setup_panel() {
     LOG_DIR="/var/log/$SVC_NAME"
 
     echo ""
+    info "Очищаем остатки прерванной установки..."
+    systemctl stop "$SVC_NAME" 2>/dev/null || true
+    systemctl disable "$SVC_NAME" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$SVC_NAME.service"
+    rm -rf "$INSTALL_DIR"
+    rm -f /tmp/add_node.py /usr/local/bin/balancer
+    systemctl daemon-reload
+
     info "Создаём директории..."
     mkdir -p "$INSTALL_DIR" "$LOG_DIR" /etc/prometheus/targets
 
@@ -266,6 +274,13 @@ setup_node() {
     [[ "$CONFIRM" == "q" ]] && { echo "Выход."; exit 0; }
     [[ "$CONFIRM" != "y" ]] && { echo ""; setup_node; return; }
     echo ""
+
+    info "Очищаем остатки прерванной установки..."
+    systemctl stop prometheus-node-exporter 2>/dev/null || true
+    docker rm -f cadvisor 2>/dev/null || true
+    while iptables -D INPUT -p tcp --dport 9100 2>/dev/null; do :; done
+    while iptables -D INPUT -p tcp --dport 8080 2>/dev/null; do :; done
+    rm -f /usr/local/bin/balancer
 
     info "Обновляем пакеты..."
     apt-get update -q

@@ -257,8 +257,8 @@ def main():
             if now.hour == DIGEST_HOUR and now.day != last_digest_day:
                 send_daily_digest()
                 last_digest_day = now.day
-            active = [uuid for uuid, in_pool in node_state.items() if in_pool]
             for node in NODES:
+                active = [uuid for uuid, in_pool in node_state.items() if in_pool]
                 check_node(node, active)
         except Exception as e:
             log.error(f"Ошибка главного цикла: {e}")
