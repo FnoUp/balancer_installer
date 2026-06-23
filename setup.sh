@@ -214,8 +214,8 @@ setup_node() {
     done < <(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^lo$|^docker|^veth|^br-|^virbr')
 
     if [ "${#IFACES[@]}" -eq 0 ]; then
-        warn "Не удалось определить интерфейс, используем ens3"
-        NET_DEV="ens3"
+        warn "Не удалось определить интерфейс, используем eth0"
+        NET_DEV="eth0"
     elif [ "${#IFACES[@]}" -eq 1 ]; then
         NET_DEV="${IFACES[0]}"
         IFACE_IP=$(ip -4 addr show "$NET_DEV" 2>/dev/null | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | head -1)

@@ -121,7 +121,7 @@ while True:
     if not location:
         print("Локация не может быть пустой"); continue
 
-    net_dev = ask("Сетевой интерфейс на ноде", "ens3")
+    net_dev = ask("Сетевой интерфейс на ноде", "eth0")
 
     host_uuid = ask("UUID хоста в Remnawave (из панели → Hosts)")
     if not host_uuid:
