@@ -186,8 +186,8 @@ WorkingDirectory=$INSTALL_DIR
 ExecStart=/usr/bin/python3 $INSTALL_DIR/balancer.py
 Restart=always
 RestartSec=10
-StandardOutput=append:$LOG_DIR/balancer.log
-StandardError=append:$LOG_DIR/balancer.log
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -360,6 +360,7 @@ vpn_node_ping_ms $PING_MS
 vpn_node_ping_ok $PING_OK
 EOF
 mv "$TMP" "$TEXTFILE_DIR/vpn_metrics.prom"
+chmod 644 "$TEXTFILE_DIR/vpn_metrics.prom"
 PING_EOF
     chmod +x /etc/vpn-balancer/ping_metrics.sh
 
@@ -403,6 +404,7 @@ cat >> "$TMP" << EOF
 vpn_node_capacity_mbps $AVG
 EOF
 mv "$TMP" "$TEXTFILE_DIR/vpn_metrics.prom"
+chmod 644 "$TEXTFILE_DIR/vpn_metrics.prom"
 SPD_EOF
     chmod +x /etc/vpn-balancer/speedtest.sh
 

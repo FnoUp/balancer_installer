@@ -57,6 +57,7 @@ last_prom_alert = 0
 last_api_alert  = 0
 last_digest_day = -1
 _hosts_cache    = {"data": [], "ts": 0.0}
+_nodes_cache    = {"data": [], "ts": 0.0}
 
 # ── Telegram ───────────────────────────────────────────────────
 
@@ -106,7 +107,7 @@ def prom_query(q):
 # ── Remnawave API ──────────────────────────────────────────────
 
 def _fetch_hosts():
-    """GET /api/hosts с кешем 90 сек — чтобы не дёргать API на каждую ноду."""
+    """GET /api/hosts с кешем 90 сек."""
     now = time.time()
     if now - _hosts_cache["ts"] < 90 and _hosts_cache["data"]:
         return _hosts_cache["data"]
@@ -124,6 +125,26 @@ def _fetch_hosts():
     except Exception as e:
         log.warning(f"fetch_hosts error: {e}")
     return _hosts_cache["data"]
+
+def _fetch_nodes():
+    """GET /api/nodes с кешем 90 сек — содержит usersOnline на каждой ноде."""
+    now = time.time()
+    if now - _nodes_cache["ts"] < 90 and _nodes_cache["data"]:
+        return _nodes_cache["data"]
+    try:
+        r = requests.get(
+            f"{REMNAWAVE_API}/nodes",
+            headers={"Authorization": f"Bearer {REMNAWAVE_TOKEN}", "Cookie": REMNAWAVE_COOKIE},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json().get("response", [])
+            _nodes_cache["data"] = data
+            _nodes_cache["ts"]   = now
+            return data
+    except Exception as e:
+        log.warning(f"fetch_nodes error: {e}")
+    return _nodes_cache["data"]
 
 def set_host_tag(host_uuid, tag):
     global last_api_alert
@@ -150,11 +171,15 @@ def set_host_tag(host_uuid, tag):
         return False
 
 def get_active_users(host_uuid):
+    """usersOnline берём из /api/nodes, сопоставляя по address хоста."""
     host = next((h for h in _fetch_hosts() if h.get("uuid") == host_uuid), None)
-    if host:
-        for field in ("usersOnlineCount", "activeUsers", "userCount", "connectedUsers", "onlineUsers"):
-            if host.get(field) is not None:
-                return int(host[field])
+    if not host:
+        return None
+    host_addr = host.get("address", "")
+    node = next((n for n in _fetch_nodes() if n.get("address", "") == host_addr), None)
+    if node:
+        val = node.get("usersOnline")
+        return int(val) if val is not None else None
     return None
 
 # ── Метрики ────────────────────────────────────────────────────
@@ -323,7 +348,7 @@ def check_node(node, nodes_in_pool):
 
     m = metrics
     score, detail = calc_score(m, active_users)
-    log.info(f"{name}: score={score} users={active_users or '?'} | {detail}")
+    log.info(f"{name}: score={score} users={'?' if active_users is None else active_users} | {detail}")
 
     # ── Алерты ──────────────────────────────────────────────────
 
