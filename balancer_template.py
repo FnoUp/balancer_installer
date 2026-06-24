@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import requests, time, logging, sys, datetime
+import requests, time, logging, sys, datetime, json, os
 from pathlib import Path
 
 PROMETHEUS_URL   = "http://localhost:9090"
@@ -30,9 +30,12 @@ CPU_CRITICAL    = 90.0
 RAM_CRITICAL    = 90.0
 MAX_PING_MS     = 300.0
 MAX_USERS       = 100
-CAPACITY_FLOOR  = 50.0   # floor при отсутствии данных или speedtest < MIN_SPEEDTEST
-MIN_SPEEDTEST   = 100.0  # ниже этого → штраф (capacity=floor) + алерт
-SPEEDTEST_WARN  = 100.0  # порог для TG-алерта
+CAPACITY_FLOOR    = 50.0   # floor-штраф при плохом/отсутствующем speedtest (нода ≥ 24ч)
+CAPACITY_GRACE    = 100.0  # floor для новых нод (< 24ч, нет speedtest и нет tx_p95)
+MIN_SPEEDTEST     = 100.0  # ниже этого → штраф capacity=50 + алерт
+SPEEDTEST_WARN    = 100.0  # порог для TG-алерта
+NODE_GRACE_PERIOD = 86400  # секунд = 24ч grace для новых нод
+FIRST_SEEN_FILE   = "/etc/vpn-balancer/node_first_seen.json"
 
 W_PING = 0.25
 W_BW   = 0.50
@@ -59,6 +62,20 @@ last_api_alert  = 0
 last_digest_day = -1
 _hosts_cache    = {"data": [], "ts": 0.0}
 _nodes_cache    = {"data": [], "ts": 0.0}
+
+def _load_first_seen():
+    try:
+        with open(FIRST_SEEN_FILE) as _f:
+            return json.load(_f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_first_seen(data):
+    os.makedirs(os.path.dirname(FIRST_SEEN_FILE), exist_ok=True)
+    with open(FIRST_SEEN_FILE, "w") as _f:
+        json.dump(data, _f)
+
+_first_seen = _load_first_seen()
 
 # ── Telegram ───────────────────────────────────────────────────
 
@@ -188,7 +205,7 @@ def get_active_users(host_uuid):
 def clamp(val, lo=0.0, hi=1.0):
     return max(lo, min(hi, val))
 
-def get_metrics(node):
+def get_metrics(node, node_age_s=0):
     inst = node["prom_instance"]
     ping = node["ping_instance"]
     dev  = node["net_device"]
@@ -240,12 +257,18 @@ def get_metrics(node):
     if None in (cpu_pct, ram_pct, tx_mbps):
         return None
 
-    # capacity: speedtest >= 100 → берём speedtest; speedtest < 100 → floor=50 (штраф);
-    # нет speedtest → tx_p95 или floor=50
+    # capacity:
+    #   speedtest >= 100          → speedtest (реальный потолок)
+    #   speedtest < 100           → 50 (штраф за медленный VPS)
+    #   нет speedtest + tx_p95>0 + нода ≥ 24ч → tx_p95 (реальный трафик)
+    #   нет speedtest + нода < 24ч             → 100 (grace, нода только добавлена)
+    #   нет данных + нода ≥ 24ч               → 50 (штраф)
     if speedtest_mbps and speedtest_mbps > 0:
         capacity = speedtest_mbps if speedtest_mbps >= MIN_SPEEDTEST else CAPACITY_FLOOR
-    elif tx_p95 and tx_p95 > 0:
+    elif tx_p95 and tx_p95 > 0 and node_age_s >= NODE_GRACE_PERIOD:
         capacity = max(tx_p95, CAPACITY_FLOOR)
+    elif node_age_s < NODE_GRACE_PERIOD:
+        capacity = CAPACITY_GRACE
     else:
         capacity = CAPACITY_FLOOR
 
@@ -346,8 +369,14 @@ def check_node(node, nodes_in_pool):
     uuid    = node["host_uuid"]
     in_pool = node_state.get(uuid, True)
 
+    # Определяем возраст ноды (сколько секунд она в системе)
+    if uuid not in _first_seen:
+        _first_seen[uuid] = time.time()
+        _save_first_seen(_first_seen)
+    node_age_s = time.time() - _first_seen[uuid]
+
     active_users = get_active_users(uuid)
-    metrics      = get_metrics(node)
+    metrics      = get_metrics(node, node_age_s)
 
     if metrics is None:
         log.error(f"{name}: не удалось получить метрики")
