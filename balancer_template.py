@@ -30,8 +30,9 @@ CPU_CRITICAL    = 90.0
 RAM_CRITICAL    = 90.0
 MAX_PING_MS     = 300.0
 MAX_USERS       = 100
-CAPACITY_FLOOR  = 100.0
-SPEEDTEST_WARN  = 100.0
+CAPACITY_FLOOR  = 50.0   # floor при отсутствии данных или speedtest < MIN_SPEEDTEST
+MIN_SPEEDTEST   = 100.0  # ниже этого → штраф (capacity=floor) + алерт
+SPEEDTEST_WARN  = 100.0  # порог для TG-алерта
 
 W_PING = 0.25
 W_BW   = 0.50
@@ -239,8 +240,14 @@ def get_metrics(node):
     if None in (cpu_pct, ram_pct, tx_mbps):
         return None
 
-    # capacity = max(speedtest, p95, floor=100)
-    capacity = max(speedtest_mbps or 0.0, tx_p95 or 0.0, CAPACITY_FLOOR)
+    # capacity: speedtest >= 100 → берём speedtest; speedtest < 100 → floor=50 (штраф);
+    # нет speedtest → tx_p95 или floor=50
+    if speedtest_mbps and speedtest_mbps > 0:
+        capacity = speedtest_mbps if speedtest_mbps >= MIN_SPEEDTEST else CAPACITY_FLOOR
+    elif tx_p95 and tx_p95 > 0:
+        capacity = max(tx_p95, CAPACITY_FLOOR)
+    else:
+        capacity = CAPACITY_FLOOR
 
     # ping_ok: textfile (нода→77.88.8.8) > blackbox probe > 1.0 (нет данных — не штрафуем)
     if ping_ok is not None:

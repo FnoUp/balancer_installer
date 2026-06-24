@@ -160,16 +160,56 @@ while True:
 
 print()
 
-# ── Проверка дублей ───────────────────────────────────────────
-try:
-    with open(NODES_YML) as _f:
-        if node_ip in _f.read():
-            warn(f"IP {node_ip} уже присутствует в {NODES_YML}")
-            if input("Продолжить всё равно? (y/n): ").strip().lower() != "y":
-                print("Отмена.")
-                sys.exit(0)
-except FileNotFoundError:
-    pass
+# ── Проверка дублей — авто-удаление старых записей ───────────
+def _remove_ip_from_yml(path, ip):
+    """Удаляет YAML-блоки содержащие ip из файла targets."""
+    if not os.path.exists(path):
+        return 0
+    with open(path) as f:
+        content = f.read()
+    if ip not in content:
+        return 0
+    # Блок начинается с "- targets:" и длится до следующего такого же блока или EOF
+    blocks = re.split(r'(?=^- targets:)', content, flags=re.MULTILINE)
+    before = len(blocks)
+    blocks = [b for b in blocks if ip not in b]
+    with open(path, "w") as f:
+        f.write("".join(blocks))
+    return before - len(blocks)
+
+def _remove_ip_from_balancer(path, ip):
+    """Удаляет строку NODES с данным IP из balancer.py."""
+    if not os.path.exists(path):
+        return 0
+    with open(path) as f:
+        content = f.read()
+    if ip not in content:
+        return 0
+    new_content = re.sub(
+        r'\s*\{[^}]*"prom_instance":\s*"' + re.escape(ip) + r':[^}]*\},?',
+        '',
+        content,
+        flags=re.DOTALL,
+    )
+    with open(path, "w") as f:
+        f.write(new_content)
+    return 1
+
+_found_dup = any(
+    os.path.exists(p) and node_ip in open(p).read()
+    for p in [NODES_YML, DOCKER_YML, PING_YML, BALANCER_FILE]
+    if os.path.exists(p)
+)
+if _found_dup:
+    warn(f"IP {node_ip} уже найден в конфигах — старые записи будут удалены и заменены новыми.")
+    for _path, _label in [(NODES_YML, "vpn_nodes.yml"), (DOCKER_YML, "docker.yml"),
+                           (PING_YML, "ping.yml")]:
+        _n = _remove_ip_from_yml(_path, node_ip)
+        if _n:
+            info(f"Удалено {_n} запис(ей) из {_label}")
+    _n = _remove_ip_from_balancer(BALANCER_FILE, node_ip)
+    if _n:
+        info(f"Удалена запись из balancer.py")
 
 # ── Проверка доступности ноды ─────────────────────────────────
 info(f"Проверяем доступность {node_ip}:9100...")
