@@ -91,9 +91,11 @@ def tg_send(chat_id, topic_id, text):
     except Exception as e:
         log.warning(f"TG send failed: {e}")
 
-def tg_metrics(text):  tg_send(TG_METRICS_CHAT_ID, TG_METRICS_TOPIC_ID, text)
-def tg_critical(text): tg_send(TG_ERRORS_CHAT_ID,  TG_ERRORS_TOPIC_ID,  text)
-def tg_report(text):   tg_send(TG_REPORTS_CHAT_ID,  TG_REPORTS_TOPIC_ID, text)
+_HDR = f"⚙️ <b>{BALANCER_NAME}</b>\n"
+
+def tg_metrics(text):  tg_send(TG_METRICS_CHAT_ID, TG_METRICS_TOPIC_ID, _HDR + text)
+def tg_critical(text): tg_send(TG_ERRORS_CHAT_ID,  TG_ERRORS_TOPIC_ID,  _HDR + text)
+def tg_report(text):   tg_send(TG_REPORTS_CHAT_ID,  TG_REPORTS_TOPIC_ID, _HDR + text)
 
 def node_can_alert(uuid, key, cooldown=ALERT_COOLDOWN):
     now = time.time()

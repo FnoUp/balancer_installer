@@ -9,8 +9,8 @@
 
 ```
 Prometheus  ←──  node_exporter (на каждой ноде)
-                 ping_metrics.sh  (пинг → 77.88.8.8)
-                 speedtest.sh     (скорость канала)
+                 ping_metrics.sh  (пинг → 77.88.8.8, каждые 5 мин)
+                 speedtest.sh     (скорость канала, каждые 8 ч)
 
 balancer.py ──→  читает метрики из Prometheus
             ──→  считает score (0.0 = отлично, 1.0 = мертво)
@@ -24,25 +24,51 @@ balancer.py ──→  читает метрики из Prometheus
 
 ---
 
+## Установка — одна команда
+
+Зайди на **сервер панели** (где установлен Remnawave) и выполни:
+
+```bash
+bash <(curl -4 -Ls "https://raw.githubusercontent.com/FnoUp/balancer_installer/master/setup.sh")
+```
+
+Скрипт задаст вопросы — заполни по таблице ниже:
+
+| Что спросит | Где взять |
+|-------------|-----------|
+| Домен панели Remnawave | твой домен, например `panel.example.com` |
+| Токен Remnawave | Панель → Admin → API Keys |
+| Токен Telegram бота | от `@BotFather` |
+| ID группы/чата | правой кнопкой на группе → Copy link → цифры |
+| ID топика Метрики | правой кнопкой на топике → Copy link → цифры |
+| ID топика Критика | аналогично |
+| ID топика Отчёты | аналогично |
+| Название балансировщика | произвольное, отображается в TG-уведомлениях |
+
+После установки панели нужно поставить агентов на **каждую ноду** — скрипт предложит это сделать автоматически (нужен SSH-доступ с панели к ноде).
+
+---
+
 ## Файлы проекта
 
 ```
-setup.sh          ← установка всего на сервер панели
-add_node.py       ← добавить новую ноду в мониторинг
+setup.sh              ← установка всего одной командой
+add_node.py           ← добавить новую ноду в мониторинг
 balancer_template.py  ← шаблон балансировщика (%%ЗАГЛУШКИ%%)
-sim_alerts.py     ← симуляция всех 19 уведомлений (тест)
-real_alerts.py    ← реальные уведомления с живыми метриками
+sim_alerts.py         ← симуляция всех 19 уведомлений (тест)
+real_alerts.py        ← реальные уведомления с живыми метриками
+balancer.sh           ← CLI-команда управления (устанавливается как `balancer`)
 ```
 
-**На сервере панели (163.5.16.247):**
+**На сервере панели (`<IP_ПАНЕЛИ>` — твой VPS с Remnawave):**
 ```
-/opt/vpn-balancer/balancer.py       ← рабочий балансировщик
-/etc/vpn-balancer/config            ← конфигурация (SVC_NAME и т.п.)
-/etc/vpn-balancer/node_first_seen.json  ← время добавления каждой ноды
-/var/log/vpn-balancer/balancer.log  ← лог работы
+/opt/vpn-balancer/balancer.py           ← рабочий балансировщик
+/etc/vpn-balancer/config                ← конфигурация (имя сервиса и т.п.)
+/etc/vpn-balancer/node_first_seen.json  ← время первого появления каждой ноды
+/var/log/vpn-balancer/balancer.log      ← лог работы
 ```
 
-**На каждой ноде (138.x.x.x, 45.x.x.x, ...):**
+**На каждой ноде (`<IP_НОДЫ>` — твои VPS с Xray):**
 ```
 /etc/vpn-balancer/ping_metrics.sh   ← пинг к 77.88.8.8 (каждые 5 мин)
 /etc/vpn-balancer/speedtest.sh      ← speedtest канала (каждые 8 ч)
@@ -51,54 +77,23 @@ real_alerts.py    ← реальные уведомления с живыми м
 
 ---
 
-## Установка (один раз)
-
-### Шаг 1 — Сервер панели
-
-```bash
-# Клонируй репозиторий
-git clone https://github.com/FnoUp/balancer_installer.git
-cd balancer_installer
-
-# Скопируй на сервер
-scp setup.sh root@163.5.16.247:/tmp/
-
-# Запусти установку
-ssh root@163.5.16.247
-bash /tmp/setup.sh
-```
-
-Скрипт спросит:
-- Токен Remnawave (`Admin → API Keys`)
-- Токен Telegram бота
-- ID чатов и топиков для уведомлений
-- Домен панели
-
-### Шаг 2 — Каждая нода
-
-```bash
-# setup.sh делает это автоматически при выборе "Установка на ноду"
-# Или вручную:
-ssh root@<IP_НОДЫ>
-# Далее setup.sh определит тип (нода) и установит node_exporter + скрипты
-```
-
----
-
 ## Добавить новую ноду
 
 ```bash
-ssh root@163.5.16.247
+# Зайди на сервер панели:
+ssh root@<IP_ПАНЕЛИ>   # замени на реальный IP панели
+
 python3 /opt/vpn-balancer/add_node.py
 ```
 
 Скрипт спросит:
+
 | Поле | Где взять |
 |------|-----------|
 | Название ноды | любое (fr1, de1, fi1) |
-| IP адрес ноды | IP вашего VPS |
-| Локация | france / finland / germany |
-| Сетевой интерфейс | обычно `eth0` (проверь `ip link`) |
+| IP адрес ноды | IP твоего VPS |
+| Локация | france / finland / germany / … |
+| Сетевой интерфейс | обычно `eth0` (проверь `ip link` на ноде) |
 | UUID хоста Remnawave | Панель → Hosts → нужный хост → UUID |
 
 Скрипт автоматически:
@@ -111,7 +106,8 @@ python3 /opt/vpn-balancer/add_node.py
 
 ## Настройки балансировщика
 
-Все переменные в `/opt/vpn-balancer/balancer.py` (секция констант):
+Все переменные в `/opt/vpn-balancer/balancer.py` (секция констант вверху файла).
+После изменений: `systemctl restart vpn-balancer`.
 
 ### Пороги score
 ```python
@@ -152,7 +148,6 @@ W_USER = 0.15   # активные юзеры / 100
 W_CPU  = 0.07   # загрузка CPU
 W_RAM  = 0.03   # загрузка RAM
 ```
-
 *Сумма весов = 1.0. score ∈ [0.0, 1.0], чем выше — тем хуже.*
 
 ### Интервалы
@@ -166,9 +161,11 @@ ALERT_COOLDOWN = 1800   # 30 мин между повторными алерта
 
 ## Уведомления
 
-Три чата в Telegram:
+Каждое уведомление начинается с первой строки: `⚙️ <Название балансировщика>` — чтобы сразу было видно откуда пришло.
 
-### 📊 Метрики (топик 233)
+Три чата / три топика в Telegram (настраиваются при установке):
+
+### 📊 Метрики (топик `<ID_МЕТРИКИ>`)
 | # | Уведомление | Когда |
 |---|-------------|-------|
 | 01 | 🚀 Балансировщик запущен | при старте сервиса |
@@ -187,15 +184,15 @@ ALERT_COOLDOWN = 1800   # 30 мин между повторными алерта
 | 14 | 🟢 Нода возвращена в пул | score < 0.55 |
 | 15 | 🟢 Новая нода подключена | после add_node.py |
 
-### 🚨 Критика (топик 4)
+### 🚨 Критика (топик `<ID_КРИТИКИ>`)
 | # | Уведомление | Когда |
 |---|-------------|-------|
 | 16 | ⚠️ Деградация — последняя нода перегружена | score > 0.75, нода одна — **выводить нельзя**, пользователи ещё в сети |
 | 17 | 🚨 Сервис недоступен — все ноды упали | пул пуст, подключения невозможны |
 
-> **Разница:** 16 — сервис деградировал (нода в пуле), 17 — сервис упал (0 нод).
+> **Разница:** 16 — сервис деградировал (нода в пуле, юзеры ещё подключены), 17 — сервис полностью упал (0 нод).
 
-### 📋 Отчёты (топик 6)
+### 📋 Отчёты (топик `<ID_ОТЧЁТОВ>`)
 | # | Уведомление | Когда |
 |---|-------------|-------|
 | 18 | 📊 Дайджест нод | ежедневно в 09:00 UTC |
@@ -234,39 +231,37 @@ score = ping_score × 0.25
 
 ### Проверить, что балансировщик работает
 ```bash
-ssh root@163.5.16.247
+ssh root@<IP_ПАНЕЛИ>        # замени на IP сервера с Remnawave
 systemctl status vpn-balancer
 tail -f /var/log/vpn-balancer/balancer.log
 ```
 
 ### Посмотреть текущий score нод
 ```bash
-# В логе ищи строки вида:
-# 2026-06-24 09:02:01 [INFO] France: score=0.056 users=3 | ping=52ms bw=1.3/712Мбит/с ...
 grep "score=" /var/log/vpn-balancer/balancer.log | tail -20
+# Вывод: France: score=0.056 users=3 | ping=52ms bw=1.3/712Мбит/с ...
 ```
 
 ### Проверить метрики Prometheus
-```bash
-# Открыть в браузере:
-http://163.5.16.247:9090/targets     # все цели (должны быть UP)
-http://163.5.16.247:9090/graph       # ручные запросы
+```
+# Открыть в браузере (замени IP):
+http://<IP_ПАНЕЛИ>:9090/targets   ← все цели должны быть UP
+http://<IP_ПАНЕЛИ>:9090/graph     ← ручные запросы
 
-# Пример: текущий пинг France
-vpn_node_ping_ms{instance="138.124.251.48:9100"}
+# Пример запроса — текущий пинг ноды:
+vpn_node_ping_ms{instance="<IP_НОДЫ>:9100"}
 ```
 
-### Проверить, что node_exporter читает метрики с ноды
+### Проверить что node_exporter отдаёт метрики с ноды
 ```bash
-# С сервера панели:
-ssh root@163.5.16.247
-curl http://138.124.251.48:9100/metrics | grep vpn_node
-# Должны быть vpn_node_ping_ms, vpn_node_ping_ok, vpn_node_capacity_mbps
+# С сервера панели (замени IP):
+curl http://<IP_НОДЫ>:9100/metrics | grep vpn_node
+# Должны быть: vpn_node_ping_ms, vpn_node_ping_ok, vpn_node_capacity_mbps
 ```
 
 ### Принудительно запустить speedtest / пинг на ноде
 ```bash
-ssh root@138.124.251.48
+ssh root@<IP_НОДЫ>     # замени на IP ноды
 bash /etc/vpn-balancer/ping_metrics.sh
 bash /etc/vpn-balancer/speedtest.sh
 cat /var/lib/node_exporter/textfile_collector/vpn_metrics.prom
@@ -274,11 +269,13 @@ cat /var/lib/node_exporter/textfile_collector/vpn_metrics.prom
 
 ### Отправить тестовые уведомления
 ```bash
-# Все 19 сценариев (симуляция):
+# На сервере панели:
+ssh root@<IP_ПАНЕЛИ>
+
+# Все 19 сценариев (тестовые данные):
 python3 /tmp/sim_alerts.py
 
-# Реальные данные:
-scp real_alerts.py root@163.5.16.247:/tmp/
+# Реальные данные из Prometheus:
 python3 /tmp/real_alerts.py
 ```
 
@@ -292,7 +289,7 @@ python3 /tmp/real_alerts.py
 | Уведомления дублируются | двойное логирование | в systemd-сервисе должно быть `StandardOutput=journal` |
 | `users=?` в логе | нет ответа от `/api/nodes` | проверь REMNAWAVE_TOKEN и REMNAWAVE_COOKIE в balancer.py |
 | Speedtest 0 или нет | cron не запустился | `crontab -l` на ноде, проверь `/etc/vpn-balancer/speedtest.sh` |
-| Score всегда 0 | нет tx-трафика (нода пустая) | нормально, при росте нагрузки score вырастет |
+| Score всегда ~0 | нет tx-трафика (нода пустая) | нормально, при росте нагрузки score вырастет |
 | Нода не возвращается в пул | score выше 0.55 | посмотри метрики в Prometheus, найди узкое место |
 
 ---
@@ -302,27 +299,27 @@ python3 /tmp/real_alerts.py
 ```python
 NODES = [
     {
-        "name":          "🇫🇷 France",      # имя в TG-уведомлениях
-        "host_uuid":     "xxxxxxxx-xxxx-...", # UUID хоста в Remnawave
-        "prom_instance": "138.124.251.48:9100", # цель Prometheus
-        "ping_instance": "138.124.251.48",   # IP для blackbox probe
-        "net_device":    "eth0",             # сетевой интерфейс на ноде
+        "name":          "🇫🇷 France",        # имя в TG-уведомлениях
+        "host_uuid":     "<UUID из Remnawave>", # Панель → Hosts → UUID
+        "prom_instance": "<IP_НОДЫ>:9100",      # цель Prometheus (node_exporter)
+        "ping_instance": "<IP_НОДЫ>",           # IP для blackbox probe
+        "net_device":    "eth0",                # сетевой интерфейс (`ip link` на ноде)
     },
-    # ... следующие ноды
+    # ... следующие ноды добавляются через add_node.py
 ]
 ```
 
-UUID берётся из Remnawave: `Admin → Hosts → <нода> → UUID`.  
-После изменения этого файла: `systemctl restart vpn-balancer`.
+После изменения этого файла вручную: `systemctl restart vpn-balancer`.
 
 ---
 
-## Версии файлов
+## Файлы и их назначение
 
 | Файл | Назначение |
 |------|------------|
-| `setup.sh` | Полная установка (панель + нода) |
-| `balancer_template.py` | Шаблон (с `%%ЗАГЛУШКАМИ%%`) — не запускать напрямую |
-| `add_node.py` | Добавление ноды, запускается на панели |
-| `sim_alerts.py` | Тест: все 19 TG-уведомлений с тестовыми данными |
+| `setup.sh` | Полная установка (панель + нода), запускается одной командой curl |
+| `balancer_template.py` | Шаблон с `%%ЗАГЛУШКАМИ%%` — setup.sh подставляет реальные значения |
+| `add_node.py` | Добавление новой ноды, запускается на сервере панели |
+| `balancer.sh` | CLI-инструмент (`balancer`) для управления сервисом |
+| `sim_alerts.py` | Тест: симуляция всех 19 TG-уведомлений с тестовыми данными |
 | `real_alerts.py` | Тест: реальные уведомления с данными из Prometheus |
