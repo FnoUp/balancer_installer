@@ -263,9 +263,9 @@ def get_metrics(node, node_age_s=0):
     #   нет speedtest + tx_p95>0 + нода ≥ 24ч → tx_p95 (реальный трафик)
     #   нет speedtest + нода < 24ч             → 100 (grace, нода только добавлена)
     #   нет данных + нода ≥ 24ч               → 50 (штраф)
-    if speedtest_mbps and speedtest_mbps > 0:
+    if speedtest_mbps:
         capacity = speedtest_mbps if speedtest_mbps >= MIN_SPEEDTEST else CAPACITY_FLOOR
-    elif tx_p95 and tx_p95 > 0 and node_age_s >= NODE_GRACE_PERIOD:
+    elif tx_p95 and node_age_s >= NODE_GRACE_PERIOD:
         capacity = max(tx_p95, CAPACITY_FLOOR)
     elif node_age_s < NODE_GRACE_PERIOD:
         capacity = CAPACITY_GRACE
@@ -311,7 +311,7 @@ def calc_score(m, active_users=0):
     )
     detail = (
         f"ping={m['ping_ms']:.0f}ms "
-        f"bw={m['tx_mbps']:.1f}/{m['capacity']:.0f}Mbps "
+        f"bw={m['tx_mbps']:.1f}/{m['capacity']:.0f}Мбит/с "
         f"users={active_users or 0} "
         f"cpu={m['cpu_pct']:.1f}% ram={m['ram_pct']:.1f}%"
     )
@@ -328,7 +328,8 @@ def send_daily_digest():
         in_pool = node_state.get(uuid, False)
         status  = "● в пуле" if in_pool else "○ вне пула"
         users   = get_active_users(uuid) or 0
-        m = get_metrics(node)
+        age_s   = time.time() - _first_seen.get(uuid, time.time())
+        m = get_metrics(node, age_s)
         if m is None:
             lines.append(f"<b>{name}</b>  {status}\n  ⚠️ метрики недоступны\n")
             continue
