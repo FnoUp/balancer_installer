@@ -449,8 +449,10 @@ def check_node(node, nodes_in_pool):
         if len(nodes_in_pool) <= 1:
             log.warning(f"{name}: перегружена, но единственная — оставляем")
             tg_critical(
-                f"⚠️ <b>Нода перегружена, единственная в пуле</b>\n"
-                f"Нода: <b>{name}</b>\nScore: <code>{score}</code>\n<code>{detail}</code>"
+                f"⚠️ <b>Деградация — последняя нода перегружена</b>\n"
+                f"Нода: <b>{name}</b>  score=<code>{score}</code>\n"
+                f"Пользователи ещё подключены, но качество снижено.\n"
+                f"<code>{detail}</code>"
             )
             return
         if set_host_tag(uuid, ""):
@@ -462,8 +464,10 @@ def check_node(node, nodes_in_pool):
             )
             if not any(node_state.values()):
                 tg_critical(
-                    f"🚨 <b>ВСЕ НОДЫ ВЫВЕДЕНЫ ИЗ ПУЛА</b>\n"
-                    f"Пользователи не могут подключиться!\nПоследняя: <b>{name}</b>"
+                    f"🚨 <b>СЕРВИС НЕДОСТУПЕН — все ноды упали</b>\n"
+                    f"Пул пуст, подключения невозможны.\n"
+                    f"Последней выведена: <b>{name}</b>  score=<code>{score}</code>\n"
+                    f"<code>{detail}</code>"
                 )
 
     elif score < SCORE_GOOD and not in_pool:
