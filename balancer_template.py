@@ -2,38 +2,42 @@
 import requests, time, logging, sys, datetime
 from pathlib import Path
 
-PROMETHEUS_URL      = "http://localhost:9090"
-REMNAWAVE_API       = "https://%%DOMAIN%%/api"
-REMNAWAVE_TOKEN     = "%%RW_TOKEN%%"
-REMNAWAVE_COOKIE    = "%%RW_COOKIE%%"
+PROMETHEUS_URL   = "http://localhost:9090"
+REMNAWAVE_API    = "https://%%DOMAIN%%/api"
+REMNAWAVE_TOKEN  = "%%RW_TOKEN%%"
+REMNAWAVE_COOKIE = "%%RW_COOKIE%%"
 
-TG_BOT_TOKEN         = "%%TG_TOKEN%%"
+TG_BOT_TOKEN        = "%%TG_TOKEN%%"
+TG_METRICS_CHAT_ID  = "%%TG_METRICS_CHAT%%"
+TG_METRICS_TOPIC_ID = %%TG_METRICS_TOPIC%%
+TG_ERRORS_CHAT_ID   = "%%TG_ERRORS_CHAT%%"
+TG_ERRORS_TOPIC_ID  = %%TG_ERRORS_TOPIC%%
+TG_REPORTS_CHAT_ID  = "%%TG_REP_CHAT%%"
+TG_REPORTS_TOPIC_ID = %%TG_REP_TOPIC%%
 
-# Отдельный чат балансировщика — все штатные алерты
-TG_METRICS_CHAT_ID   = "%%TG_METRICS_CHAT%%"
-TG_METRICS_TOPIC_ID  = %%TG_METRICS_TOPIC%%
+BALANCER_NAME  = "%%BALANCER_NAME%%"
+BALANCER_TAG   = "%%BALANCER_TAG%%"
+LOG_FILE       = "/var/log/%%SVC_NAME%%/balancer.log"
 
-# Чат варнингов бота — критично: все ноды упали / осталась 1
-TG_ERRORS_CHAT_ID    = "%%TG_ERRORS_CHAT%%"
-TG_ERRORS_TOPIC_ID   = %%TG_ERRORS_TOPIC%%
+CHECK_INTERVAL = 120
+DIGEST_HOUR    = 9
+ALERT_COOLDOWN = 1800
 
-# Чат отчётов бота — ежедневный дайджест score
-TG_REPORTS_CHAT_ID   = "%%TG_REP_CHAT%%"
-TG_REPORTS_TOPIC_ID  = %%TG_REP_TOPIC%%
+SCORE_BAD  = 0.75
+SCORE_GOOD = 0.55
 
-BALANCER_NAME    = "%%BALANCER_NAME%%"
-BALANCER_TAG     = "%%BALANCER_TAG%%"
-LOG_FILE         = "/var/log/%%SVC_NAME%%/balancer.log"
-CHECK_INTERVAL   = 120
-DIGEST_HOUR      = 9       # час UTC для ежедневного дайджеста
-ALERT_COOLDOWN   = 1800    # не спамим одну ошибку чаще раза в 30 мин
+CPU_CRITICAL    = 90.0
+RAM_CRITICAL    = 90.0
+MAX_PING_MS     = 300.0
+MAX_USERS       = 100
+CAPACITY_FLOOR  = 100.0
+SPEEDTEST_WARN  = 100.0
 
-SCORE_BAD        = 0.75
-SCORE_GOOD       = 0.55
-CPU_CRITICAL     = 90.0
-RAM_CRITICAL     = 90.0
-MAX_PING_MS      = 300.0
-MAX_CONNECTIONS  = 1000.0
+W_PING = 0.25
+W_BW   = 0.50
+W_USER = 0.15
+W_CPU  = 0.07
+W_RAM  = 0.03
 
 NODES = [
     # Добавляй следующие ноды по аналогии:
@@ -47,12 +51,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("balancer")
 
-node_state           = {}
-last_prom_err_alert  = 0
-last_api_err_alert   = 0
-last_digest_day      = -1
+node_state      = {}
+node_alerts     = {}
+last_prom_alert = 0
+last_api_alert  = 0
+last_digest_day = -1
+_hosts_cache    = {"data": [], "ts": 0.0}
 
-# ── Telegram ───────────────────────────────────────────────────────────────────
+# ── Telegram ───────────────────────────────────────────────────
 
 def tg_send(chat_id, topic_id, text):
     try:
@@ -64,24 +70,27 @@ def tg_send(chat_id, topic_id, text):
             json=payload, timeout=10,
         )
     except Exception as e:
-        log.warning(f"Telegram send failed: {e}")
+        log.warning(f"TG send failed: {e}")
 
-# Штатные алерты балансировщика → отдельный чат метрик
-def tg_metrics(text):
-    tg_send(TG_METRICS_CHAT_ID, TG_METRICS_TOPIC_ID, text)
+def tg_metrics(text):  tg_send(TG_METRICS_CHAT_ID, TG_METRICS_TOPIC_ID, text)
+def tg_critical(text): tg_send(TG_ERRORS_CHAT_ID,  TG_ERRORS_TOPIC_ID,  text)
+def tg_report(text):   tg_send(TG_REPORTS_CHAT_ID,  TG_REPORTS_TOPIC_ID, text)
 
-# Критические алерты → чат варнингов бота
-def tg_critical(text):
-    tg_send(TG_ERRORS_CHAT_ID, TG_ERRORS_TOPIC_ID, text)
+def node_can_alert(uuid, key, cooldown=ALERT_COOLDOWN):
+    now = time.time()
+    node_alerts.setdefault(uuid, {})
+    if now - node_alerts[uuid].get(key, 0) > cooldown:
+        node_alerts[uuid][key] = now
+        return True
+    return False
 
-# Ежедневный дайджест → чат отчётов бота
-def tg_report(text):
-    tg_send(TG_REPORTS_CHAT_ID, TG_REPORTS_TOPIC_ID, text)
+def node_reset_alert(uuid, key):
+    node_alerts.setdefault(uuid, {})[key] = 0
 
-# ── Prometheus ─────────────────────────────────────────────────────────────────
+# ── Prometheus ─────────────────────────────────────────────────
 
 def prom_query(q):
-    global last_prom_err_alert
+    global last_prom_alert
     try:
         r = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": q}, timeout=10)
         results = r.json()["data"]["result"]
@@ -89,38 +98,66 @@ def prom_query(q):
     except Exception as e:
         log.warning(f"Prometheus query failed [{q[:60]}]: {e}")
         now = time.time()
-        if now - last_prom_err_alert > ALERT_COOLDOWN:
-            last_prom_err_alert = now
+        if now - last_prom_alert > ALERT_COOLDOWN:
+            last_prom_alert = now
             tg_metrics(f"❌ <b>Prometheus недоступен</b>\nМетрики не читаются\n<code>{e}</code>")
         return None
 
-# ── Remnawave API ──────────────────────────────────────────────────────────────
+# ── Remnawave API ──────────────────────────────────────────────
+
+def _fetch_hosts():
+    """GET /api/hosts с кешем 90 сек — чтобы не дёргать API на каждую ноду."""
+    now = time.time()
+    if now - _hosts_cache["ts"] < 90 and _hosts_cache["data"]:
+        return _hosts_cache["data"]
+    try:
+        r = requests.get(
+            f"{REMNAWAVE_API}/hosts",
+            headers={"Authorization": f"Bearer {REMNAWAVE_TOKEN}", "Cookie": REMNAWAVE_COOKIE},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json().get("response", [])
+            _hosts_cache["data"] = data
+            _hosts_cache["ts"]   = now
+            return data
+    except Exception as e:
+        log.warning(f"fetch_hosts error: {e}")
+    return _hosts_cache["data"]
 
 def set_host_tag(host_uuid, tag):
-    global last_api_err_alert
+    global last_api_alert
     try:
         r = requests.patch(
             f"{REMNAWAVE_API}/hosts",
             headers={
-                "Authorization":  f"Bearer {REMNAWAVE_TOKEN}",
-                "Cookie":         REMNAWAVE_COOKIE,
-                "Content-Type":   "application/json",
+                "Authorization": f"Bearer {REMNAWAVE_TOKEN}",
+                "Cookie":        REMNAWAVE_COOKIE,
+                "Content-Type":  "application/json",
             },
             json={"uuid": host_uuid, "tag": tag},
             timeout=15,
         )
         if r.status_code != 200:
-            raise Exception(f"HTTP {r.status_code}: {r.text[:100]}")
+            raise Exception(f"HTTP {r.status_code}: {r.text[:120]}")
         return True
     except Exception as e:
-        log.error(f"Remnawave API error: {e}")
+        log.error(f"Remnawave set_host_tag error: {e}")
         now = time.time()
-        if now - last_api_err_alert > ALERT_COOLDOWN:
-            last_api_err_alert = now
+        if now - last_api_alert > ALERT_COOLDOWN:
+            last_api_alert = now
             tg_metrics(f"❌ <b>Ошибка API Remnawave</b>\nНе удалось обновить тег хоста\n<code>{e}</code>")
         return False
 
-# ── Метрики ────────────────────────────────────────────────────────────────────
+def get_active_users(host_uuid):
+    host = next((h for h in _fetch_hosts() if h.get("uuid") == host_uuid), None)
+    if host:
+        for field in ("usersOnlineCount", "activeUsers", "userCount", "connectedUsers", "onlineUsers"):
+            if host.get(field) is not None:
+                return int(host[field])
+    return None
+
+# ── Метрики ────────────────────────────────────────────────────
 
 def clamp(val, lo=0.0, hi=1.0):
     return max(lo, min(hi, val))
@@ -129,44 +166,103 @@ def get_metrics(node):
     inst = node["prom_instance"]
     ping = node["ping_instance"]
     dev  = node["net_device"]
-    ping_ms     = prom_query(f"probe_duration_seconds{{job='vpn_ping',instance='{ping}'}} * 1000")
-    ping_ok     = prom_query(f"probe_success{{job='vpn_ping',instance='{ping}'}}")
-    cpu_pct     = prom_query(f"100-(avg(rate(node_cpu_seconds_total{{instance='{inst}',mode='idle'}}[5m]))*100)")
-    ram_pct     = prom_query(f"100*(1-node_memory_MemAvailable_bytes{{instance='{inst}'}}/node_memory_MemTotal_bytes{{instance='{inst}'}})")
-    tx_mbps     = prom_query(f"rate(node_network_transmit_bytes_total{{instance='{inst}',device='{dev}'}}[5m])*8/1024/1024")
-    tx_max_mbps = prom_query(f"max_over_time(rate(node_network_transmit_bytes_total{{instance='{inst}',device='{dev}'}}[5m])[24h:5m])*8/1024/1024")
-    tcp_conn    = prom_query(f"node_netstat_Tcp_CurrEstab{{instance='{inst}'}}")
-    if None in (ping_ms, cpu_pct, ram_pct, tx_mbps):
+
+    # Доступность ноды — blackbox с панели к IP ноды
+    probe_ok = prom_query(f"probe_success{{job='vpn_ping',instance='{ping}'}}")
+
+    # Пинг с ноды до 77.88.8.8 (textfile_collector каждые 5 мин)
+    ping_ms = prom_query(f"vpn_node_ping_ms{{instance='{inst}'}}")
+    ping_ok = prom_query(f"vpn_node_ping_ok{{instance='{inst}'}}")
+
+    # CPU и RAM
+    cpu_pct = prom_query(
+        f"100-(avg(rate(node_cpu_seconds_total{{instance='{inst}',mode='idle'}}[5m]))*100)"
+    )
+    ram_pct = prom_query(
+        f"100*(1-node_memory_MemAvailable_bytes{{instance='{inst}'}}"
+        f"/node_memory_MemTotal_bytes{{instance='{inst}'}})"
+    )
+
+    # Bandwidth — tx прямо сейчас
+    tx_mbps = prom_query(
+        f"rate(node_network_transmit_bytes_total{{instance='{inst}',device='{dev}'}}[5m])*8/1024/1024"
+    )
+
+    # Bandwidth — 95-й перцентиль за 24ч (реальный потолок без пиков)
+    tx_p95 = prom_query(
+        f"quantile_over_time(0.95,"
+        f"rate(node_network_transmit_bytes_total{{instance='{inst}',device='{dev}'}}[5m])"
+        f"[24h:5m])*8/1024/1024"
+    )
+
+    # Speedtest — ёмкость канала (обновляется каждые 8ч)
+    speedtest_mbps = prom_query(f"vpn_node_capacity_mbps{{instance='{inst}'}}")
+
+    # Нода недоступна через blackbox — возвращаем аварийный набор
+    if probe_ok is not None and probe_ok < 1:
+        return {
+            "ping_ms":       9999.0,
+            "ping_ok":       0.0,
+            "cpu_pct":       cpu_pct or 0.0,
+            "ram_pct":       ram_pct or 0.0,
+            "tx_mbps":       tx_mbps or 0.0,
+            "capacity":      CAPACITY_FLOOR,
+            "speedtest_mbps": speedtest_mbps or 0.0,
+        }
+
+    # Нет основных метрик — пропускаем итерацию
+    if None in (cpu_pct, ram_pct, tx_mbps):
         return None
+
+    # capacity = max(speedtest, p95, floor=100)
+    capacity = max(speedtest_mbps or 0.0, tx_p95 or 0.0, CAPACITY_FLOOR)
+
+    # ping_ok: textfile (нода→77.88.8.8) > blackbox probe > 1.0 (нет данных — не штрафуем)
+    if ping_ok is not None:
+        eff_ping_ok = ping_ok
+        eff_ping_ms = ping_ms if ping_ms is not None else 9999.0
+    elif probe_ok is not None and probe_ok < 1:
+        eff_ping_ok = 0.0
+        eff_ping_ms = 9999.0
+    else:
+        # данных ещё нет (нода только добавлена) — не штрафуем
+        eff_ping_ok = 1.0
+        eff_ping_ms = ping_ms if ping_ms is not None else 0.0
+
     return {
-        "ping_ms":     ping_ms,
-        "ping_ok":     ping_ok if ping_ok is not None else 1.0,
-        "cpu_pct":     cpu_pct,
-        "ram_pct":     ram_pct,
-        "tx_mbps":     tx_mbps,
-        "tx_max_mbps": tx_max_mbps if tx_max_mbps and tx_max_mbps > 0 else max(tx_mbps, 1.0),
-        "tcp_conn":    tcp_conn if tcp_conn is not None else 0.0,
+        "ping_ms":        eff_ping_ms,
+        "ping_ok":        eff_ping_ok,
+        "cpu_pct":        cpu_pct,
+        "ram_pct":        ram_pct,
+        "tx_mbps":        tx_mbps,
+        "capacity":       capacity,
+        "speedtest_mbps": speedtest_mbps or 0.0,
     }
 
-def calc_score(m):
+def calc_score(m, active_users=0):
     if m["ping_ok"] < 1:
         return 1.0, "ping FAIL"
     if m["cpu_pct"] >= CPU_CRITICAL:
         return 1.0, f"CPU CRITICAL {m['cpu_pct']:.0f}%"
     if m["ram_pct"] >= RAM_CRITICAL:
         return 1.0, f"RAM CRITICAL {m['ram_pct']:.0f}%"
+
     score = (
-        clamp(m["ping_ms"] / MAX_PING_MS)                * 0.35 +
-        clamp(m["tx_mbps"] / max(m["tx_max_mbps"], 1.0)) * 0.40 +
-        clamp(m["tcp_conn"] / MAX_CONNECTIONS)            * 0.15 +
-        clamp(m["cpu_pct"] / 100.0)                      * 0.07 +
-        clamp(m["ram_pct"] / 100.0)                      * 0.03
+        clamp(m["ping_ms"] / MAX_PING_MS)                * W_PING +
+        clamp(m["tx_mbps"] / max(m["capacity"], 1.0))    * W_BW   +
+        clamp((active_users or 0) / MAX_USERS)           * W_USER +
+        clamp(m["cpu_pct"] / 100.0)                      * W_CPU  +
+        clamp(m["ram_pct"] / 100.0)                      * W_RAM
     )
-    detail = (f"ping={m['ping_ms']:.0f}ms bw={m['tx_mbps']:.1f}/{m['tx_max_mbps']:.1f}Mbps "
-              f"conn={m['tcp_conn']:.0f} cpu={m['cpu_pct']:.1f}% ram={m['ram_pct']:.1f}%")
+    detail = (
+        f"ping={m['ping_ms']:.0f}ms "
+        f"bw={m['tx_mbps']:.1f}/{m['capacity']:.0f}Mbps "
+        f"users={active_users or 0} "
+        f"cpu={m['cpu_pct']:.1f}% ram={m['ram_pct']:.1f}%"
+    )
     return round(score, 4), detail
 
-# ── Дайджест ───────────────────────────────────────────────────────────────────
+# ── Дайджест ───────────────────────────────────────────────────
 
 def send_daily_digest():
     date_str = datetime.datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
@@ -176,75 +272,168 @@ def send_daily_digest():
         uuid    = node["host_uuid"]
         in_pool = node_state.get(uuid, False)
         status  = "● в пуле" if in_pool else "○ вне пула"
+        users   = get_active_users(uuid) or 0
         m = get_metrics(node)
         if m is None:
             lines.append(f"<b>{name}</b>  {status}\n  ⚠️ метрики недоступны\n")
             continue
-        score, _ = calc_score(m)
+        score, _ = calc_score(m, users)
         icon = "🟢" if score < SCORE_GOOD else ("🟡" if score < SCORE_BAD else "🔴")
+        spd = f"{m['speedtest_mbps']:.0f}" if m["speedtest_mbps"] > 0 else "нет"
         lines.append(
             f"{icon} <b>{name}</b>  {status}\n"
             f"  score={score}  ping={m['ping_ms']:.0f}ms  "
-            f"bw={m['tx_mbps']:.1f}/{m['tx_max_mbps']:.1f}Mbps  "
-            f"cpu={m['cpu_pct']:.1f}%  ram={m['ram_pct']:.1f}%\n"
+            f"bw={m['tx_mbps']:.1f}/{m['capacity']:.0f}Mbps  spd={spd}Mbps\n"
+            f"  users={users}  cpu={m['cpu_pct']:.1f}%  ram={m['ram_pct']:.1f}%\n"
         )
     tg_report("\n".join(lines))
     log.info("Дайджест отправлен")
 
-# ── Проверка ноды ──────────────────────────────────────────────────────────────
+def send_daily_log():
+    try:
+        today    = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+        log_path = Path(LOG_FILE)
+        if not log_path.exists():
+            return
+        lines = [l.strip() for l in log_path.read_text(errors="replace").splitlines() if today in l]
+        if not lines:
+            return
+        recent = lines[-50:]
+        text = f"📋 <b>Лог балансировщика — {today}</b>\n<pre>" + "\n".join(recent) + "</pre>"
+        if len(text) > 4000:
+            text = text[:3950] + "\n…</pre>"
+        tg_report(text)
+        log.info("Дейли лог отправлен")
+    except Exception as e:
+        log.error(f"send_daily_log error: {e}")
+
+# ── Проверка ноды ──────────────────────────────────────────────
 
 def check_node(node, nodes_in_pool):
     name    = node["name"]
     uuid    = node["host_uuid"]
     in_pool = node_state.get(uuid, True)
-    metrics = get_metrics(node)
+
+    active_users = get_active_users(uuid)
+    metrics      = get_metrics(node)
+
     if metrics is None:
         log.error(f"{name}: не удалось получить метрики")
         return
-    score, detail = calc_score(metrics)
-    log.info(f"{name}: score={score} | {detail}")
+
+    m = metrics
+    score, detail = calc_score(m, active_users)
+    log.info(f"{name}: score={score} users={active_users or '?'} | {detail}")
+
+    # ── Алерты ──────────────────────────────────────────────────
+
+    # Пинг
+    if m["ping_ok"] < 1:
+        if node_can_alert(uuid, "ping_fail"):
+            tg_metrics(f"📡 <b>Пинг недоступен</b>\nНода: <b>{name}</b>\n77.88.8.8 не отвечает")
+    elif m["ping_ms"] > MAX_PING_MS:
+        if node_can_alert(uuid, "ping_high"):
+            tg_metrics(
+                f"📡 <b>Пинг критически высокий</b>\nНода: <b>{name}</b>\n"
+                f"Пинг: <code>{m['ping_ms']:.0f}ms</code> (порог {MAX_PING_MS:.0f}ms)"
+            )
+    else:
+        was_bad = node_alerts.get(uuid, {}).get("ping_fail", 0) + node_alerts.get(uuid, {}).get("ping_high", 0)
+        if was_bad > 0:
+            node_reset_alert(uuid, "ping_fail")
+            node_reset_alert(uuid, "ping_high")
+            tg_metrics(f"✅ <b>Пинг восстановился</b>\nНода: <b>{name}</b>\nПинг: <code>{m['ping_ms']:.0f}ms</code>")
+
+    # CPU
+    if m["cpu_pct"] >= CPU_CRITICAL:
+        if node_can_alert(uuid, "cpu_crit"):
+            tg_metrics(
+                f"⚠️ <b>CPU критично</b>\nНода: <b>{name}</b>\n"
+                f"CPU: <code>{m['cpu_pct']:.0f}%</code> (порог {CPU_CRITICAL:.0f}%)"
+            )
+    elif node_alerts.get(uuid, {}).get("cpu_crit", 0) > 0 and m["cpu_pct"] < CPU_CRITICAL - 5:
+        node_reset_alert(uuid, "cpu_crit")
+        tg_metrics(f"✅ <b>CPU восстановился</b>\nНода: <b>{name}</b>\nCPU: <code>{m['cpu_pct']:.0f}%</code>")
+
+    # RAM
+    if m["ram_pct"] >= RAM_CRITICAL:
+        if node_can_alert(uuid, "ram_crit"):
+            tg_metrics(
+                f"⚠️ <b>RAM критично</b>\nНода: <b>{name}</b>\n"
+                f"RAM: <code>{m['ram_pct']:.0f}%</code> (порог {RAM_CRITICAL:.0f}%)"
+            )
+    elif node_alerts.get(uuid, {}).get("ram_crit", 0) > 0 and m["ram_pct"] < RAM_CRITICAL - 5:
+        node_reset_alert(uuid, "ram_crit")
+        tg_metrics(f"✅ <b>RAM восстановился</b>\nНода: <b>{name}</b>\nRAM: <code>{m['ram_pct']:.0f}%</code>")
+
+    # Speedtest аномально низкий (проверяем раз в 8ч)
+    if 0 < m["speedtest_mbps"] < SPEEDTEST_WARN:
+        if node_can_alert(uuid, "spd_low", cooldown=3600 * 8):
+            tg_metrics(
+                f"🐢 <b>Нода аномально медленная</b>\nНода: <b>{name}</b>\n"
+                f"Speedtest upload: <code>{m['speedtest_mbps']:.1f} Mbps</code> "
+                f"(порог {SPEEDTEST_WARN:.0f} Mbps)\nПроверь тариф VPS или сетевой интерфейс"
+            )
+
+    # Юзеров слишком много
+    if active_users is not None and active_users >= MAX_USERS:
+        if node_can_alert(uuid, "users_full"):
+            tg_metrics(
+                f"👥 <b>Нода переполнена</b>\nНода: <b>{name}</b>\n"
+                f"Активных пользователей: <code>{active_users}</code> (макс {MAX_USERS})"
+            )
+
+    # ── Логика пула ─────────────────────────────────────────────
     if score > SCORE_BAD and in_pool:
         if len(nodes_in_pool) <= 1:
             log.warning(f"{name}: перегружена, но единственная — оставляем")
             tg_critical(
-                f"⚠️ <b>VPN Balancer — критично</b>\n"
-                f"Нода <b>{name}</b> перегружена, но единственная в пуле — не выводим\n"
-                f"Score: <code>{score}</code>\n<code>{detail}</code>"
+                f"⚠️ <b>Нода перегружена, единственная в пуле</b>\n"
+                f"Нода: <b>{name}</b>\nScore: <code>{score}</code>\n<code>{detail}</code>"
             )
             return
         if set_host_tag(uuid, ""):
             node_state[uuid] = False
             log.warning(f"{name}: ВЫВЕДЕНА из пула | score={score}")
-            tg_metrics(f"🔴 <b>VPN Balancer — нода выведена</b>\nНода: <b>{name}</b>\nScore: <code>{score}</code> (порог {SCORE_BAD})\n<code>{detail}</code>")
-            active_after = [u for u, s in node_state.items() if s]
-            if len(active_after) == 0:
-                tg_critical(f"🚨 <b>ВСЕ НОДЫ ВЫВЕДЕНЫ ИЗ ПУЛА</b>\nПользователи не могут подключиться!\nПоследняя выведена: <b>{name}</b>")
+            tg_metrics(
+                f"🔴 <b>Нода выведена из пула</b>\nНода: <b>{name}</b>\n"
+                f"Score: <code>{score}</code> (порог {SCORE_BAD})\n<code>{detail}</code>"
+            )
+            if not any(node_state.values()):
+                tg_critical(
+                    f"🚨 <b>ВСЕ НОДЫ ВЫВЕДЕНЫ ИЗ ПУЛА</b>\n"
+                    f"Пользователи не могут подключиться!\nПоследняя: <b>{name}</b>"
+                )
+
     elif score < SCORE_GOOD and not in_pool:
         if set_host_tag(uuid, BALANCER_TAG):
             node_state[uuid] = True
             log.info(f"{name}: ВОЗВРАЩЕНА в пул | score={score}")
-            tg_metrics(f"🟢 <b>VPN Balancer — нода возвращена</b>\nНода: <b>{name}</b>\nScore: <code>{score}</code> (порог {SCORE_GOOD})\n<code>{detail}</code>")
+            tg_metrics(
+                f"🟢 <b>Нода возвращена в пул</b>\nНода: <b>{name}</b>\n"
+                f"Score: <code>{score}</code> (порог {SCORE_GOOD})\n<code>{detail}</code>"
+            )
 
-# ── Синхронизация начального состояния ─────────────────────────────────────────
+# ── Синхронизация состояния ─────────────────────────────────────
 
 def sync_state():
     try:
-        r = requests.get(
-            f"{REMNAWAVE_API}/hosts",
-            headers={"Authorization": f"Bearer {REMNAWAVE_TOKEN}", "Cookie": REMNAWAVE_COOKIE},
-            timeout=15,
-        )
-        hosts = r.json().get("response", [])
+        hosts = _fetch_hosts()
+        if not hosts:
+            log.warning("sync_state: пустой список хостов от API")
+            return
         for node in NODES:
             host = next((h for h in hosts if h["uuid"] == node["host_uuid"]), None)
             if host:
                 in_pool = host.get("tag") == BALANCER_TAG
                 node_state[node["host_uuid"]] = in_pool
                 log.info(f"{node['name']}: {'в пуле' if in_pool else 'вне пула'}")
+            else:
+                log.warning(f"{node['name']}: не найден в Remnawave (uuid={node['host_uuid']})")
     except Exception as e:
         log.error(f"sync_state error: {e}")
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────
 
 def main():
     global last_digest_day
@@ -256,9 +445,10 @@ def main():
             now = datetime.datetime.utcnow()
             if now.hour == DIGEST_HOUR and now.day != last_digest_day:
                 send_daily_digest()
+                send_daily_log()
                 last_digest_day = now.day
             for node in NODES:
-                active = [uuid for uuid, in_pool in node_state.items() if in_pool]
+                active = [uuid for uuid, s in node_state.items() if s]
                 check_node(node, active)
         except Exception as e:
             log.error(f"Ошибка главного цикла: {e}")

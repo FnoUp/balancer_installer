@@ -160,6 +160,17 @@ while True:
 
 print()
 
+# ── Проверка дублей ───────────────────────────────────────────
+try:
+    with open(NODES_YML) as _f:
+        if node_ip in _f.read():
+            warn(f"IP {node_ip} уже присутствует в {NODES_YML}")
+            if input("Продолжить всё равно? (y/n): ").strip().lower() != "y":
+                print("Отмена.")
+                sys.exit(0)
+except FileNotFoundError:
+    pass
+
 # ── Проверка доступности ноды ─────────────────────────────────
 info(f"Проверяем доступность {node_ip}:9100...")
 ok, out, _ = run(f"curl -s --connect-timeout 5 http://{node_ip}:9100/metrics | head -1")
@@ -270,6 +281,53 @@ if ok:
     success(f"{SVC_NAME} перезапущен")
 else:
     warn(f"Ошибка перезапуска {SVC_NAME}: {err}")
+
+# ── TG-уведомление ───────────────────────────────────────────
+def _tg_notify_node_added():
+    try:
+        with open(BALANCER_FILE) as _f:
+            _content = _f.read()
+        _tok  = re.search(r'TG_BOT_TOKEN\s*=\s*"([^"]+)"', _content)
+        _chat = re.search(r'TG_METRICS_CHAT_ID\s*=\s*"([^"]+)"', _content)
+        _tpc  = re.search(r'TG_METRICS_TOPIC_ID\s*=\s*(\d+)', _content)
+        if not _tok or not _chat or _tok.group(1).startswith("%%"):
+            warn("TG-уведомление пропущено — токен не задан в balancer.py")
+            return
+        import json as _json, urllib.request as _req
+        # Ping к ноде
+        _ping = subprocess.run(
+            ["ping", "-c", "3", "-q", node_ip], capture_output=True, text=True
+        )
+        _ping_line = next((l for l in _ping.stdout.splitlines() if "rtt" in l or "round-trip" in l), None)
+        _ping_avg = "?"
+        if _ping_line:
+            _m = re.search(r'[\d.]+/([\d.]+)/', _ping_line)
+            if _m:
+                _ping_avg = f"{float(_m.group(1)):.0f}ms"
+        _text = (
+            f"🟢 <b>Новая нода подключена</b>\n"
+            f"Нода: <b>{tg_name}</b>\n"
+            f"IP: <code>{node_ip}</code>\n"
+            f"Локация: {location}\n"
+            f"Интерфейс: {net_dev}\n"
+            f"Пинг (с панели): <code>{_ping_avg}</code>\n"
+            f"Prometheus добавлен, балансировщик перезапущен"
+        )
+        _payload = {"chat_id": _chat.group(1), "text": _text, "parse_mode": "HTML"}
+        if _tpc:
+            _payload["message_thread_id"] = int(_tpc.group(1))
+        _data = _json.dumps(_payload).encode()
+        _req.urlopen(
+            _req.Request(
+                f"https://api.telegram.org/bot{_tok.group(1)}/sendMessage",
+                data=_data, headers={"Content-Type": "application/json"}
+            ), timeout=8
+        )
+        success("TG-уведомление отправлено")
+    except Exception as _e:
+        warn(f"TG-уведомление не отправлено: {_e}")
+
+_tg_notify_node_added()
 
 # ── Итог ──────────────────────────────────────────────────────
 print()

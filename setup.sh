@@ -315,12 +315,114 @@ setup_node() {
 
     info "Закрываем порты метрик..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
-    iptables -D INPUT -p tcp --dport 9100 -j DROP 2>/dev/null || true
-    iptables -D INPUT -p tcp --dport 8080 -j DROP 2>/dev/null || true
     iptables -I INPUT -p tcp --dport 9100 ! -s "$PANEL_IP" -j DROP
     iptables -I INPUT -p tcp --dport 8080 ! -s "$PANEL_IP" -j DROP
     iptables-save > /etc/iptables/rules.v4
     success "Порты закрыты, доступны только с $PANEL_IP"
+
+    # ── Textfile collector для node_exporter ──────────────────────
+    TEXTFILE_DIR="/var/lib/prometheus/node-exporter"
+    mkdir -p "$TEXTFILE_DIR" /etc/vpn-balancer
+    DEFAULTS="/etc/default/prometheus-node-exporter"
+    if [ -f "$DEFAULTS" ]; then
+        grep -q "textfile" "$DEFAULTS" || \
+            sed -i "s|^ARGS=\"\(.*\)\"|ARGS=\"\1 --collector.textfile.directory=$TEXTFILE_DIR\"|" "$DEFAULTS"
+    else
+        echo "ARGS=\"--collector.textfile.directory=$TEXTFILE_DIR\"" > "$DEFAULTS"
+    fi
+    systemctl restart prometheus-node-exporter
+
+    # ── Скрипт пинга (каждые 5 мин → Prometheus) ─────────────────
+    cat > /etc/vpn-balancer/ping_metrics.sh << 'PING_EOF'
+#!/bin/bash
+TEXTFILE_DIR="/var/lib/prometheus/node-exporter"
+mkdir -p "$TEXTFILE_DIR"
+RESULT=$(ping -c 5 -q 77.88.8.8 2>/dev/null | tail -1)
+if [ -n "$RESULT" ]; then
+    PING_MS=$(echo "$RESULT" | awk -F/ '{printf "%.2f", $5}')
+    PING_OK=1
+else
+    PING_MS=9999
+    PING_OK=0
+fi
+TMP=$(mktemp)
+if [ -f "$TEXTFILE_DIR/vpn_metrics.prom" ]; then
+    grep -v "vpn_node_ping" "$TEXTFILE_DIR/vpn_metrics.prom" > "$TMP" 2>/dev/null || true
+else
+    touch "$TMP"
+fi
+cat >> "$TMP" << EOF
+# HELP vpn_node_ping_ms Ping to 77.88.8.8 from node in ms
+# TYPE vpn_node_ping_ms gauge
+vpn_node_ping_ms $PING_MS
+# HELP vpn_node_ping_ok 1 if ping succeeded
+# TYPE vpn_node_ping_ok gauge
+vpn_node_ping_ok $PING_OK
+EOF
+mv "$TMP" "$TEXTFILE_DIR/vpn_metrics.prom"
+PING_EOF
+    chmod +x /etc/vpn-balancer/ping_metrics.sh
+
+    # ── Скрипт speedtest (каждые 8ч → файл + Prometheus) ─────────
+    cat > /etc/vpn-balancer/speedtest.sh << 'SPD_EOF'
+#!/bin/bash
+TEXTFILE_DIR="/var/lib/prometheus/node-exporter"
+CAPACITY_FILE="/etc/vpn-balancer/node_capacity"
+LOG="/var/log/vpn-speedtest.log"
+mkdir -p "$TEXTFILE_DIR"
+
+command -v speedtest-cli &>/dev/null || pip3 install speedtest-cli -q 2>/dev/null
+
+echo "$(date): Запускаем 3 теста..." >> "$LOG"
+RESULTS=()
+for i in 1 2 3; do
+    R=$(speedtest-cli --simple --no-pre-allocate 2>/dev/null | awk '/Upload/{print $2}')
+    [ -n "$R" ] && RESULTS+=("$R") && echo "  тест $i: $R Mbps" >> "$LOG"
+    [ $i -lt 3 ] && sleep 15
+done
+
+if [ ${#RESULTS[@]} -eq 0 ]; then
+    echo "$(date): все тесты провалились" >> "$LOG"
+    exit 1
+fi
+
+SUM=0
+for r in "${RESULTS[@]}"; do
+    SUM=$(awk "BEGIN{printf \"%.2f\", $SUM + $r}")
+done
+AVG=$(awk "BEGIN{printf \"%.2f\", $SUM / ${#RESULTS[@]}}")
+echo "$AVG" > "$CAPACITY_FILE"
+echo "$(date): среднее = $AVG Mbps (${#RESULTS[@]} тестов)" >> "$LOG"
+
+TMP=$(mktemp)
+[ -f "$TEXTFILE_DIR/vpn_metrics.prom" ] && \
+    grep -v "vpn_node_capacity" "$TEXTFILE_DIR/vpn_metrics.prom" > "$TMP" 2>/dev/null || true
+cat >> "$TMP" << EOF
+# HELP vpn_node_capacity_mbps Upload Mbps from speedtest (avg of 3 tests)
+# TYPE vpn_node_capacity_mbps gauge
+vpn_node_capacity_mbps $AVG
+EOF
+mv "$TMP" "$TEXTFILE_DIR/vpn_metrics.prom"
+SPD_EOF
+    chmod +x /etc/vpn-balancer/speedtest.sh
+
+    # ── Cron задачи ────────────────────────────────────────────────
+    cat > /etc/cron.d/vpn-node-metrics << 'CRON_EOF'
+*/5 * * * * root /etc/vpn-balancer/ping_metrics.sh
+0 */8 * * * root /etc/vpn-balancer/speedtest.sh
+CRON_EOF
+
+    # ── Первый запуск ──────────────────────────────────────────────
+    info "Замеряем пинг до 77.88.8.8..."
+    /etc/vpn-balancer/ping_metrics.sh
+    PING_RESULT=$(grep "^vpn_node_ping_ms" "$TEXTFILE_DIR/vpn_metrics.prom" 2>/dev/null | awk '{print $2}')
+    [ -n "$PING_RESULT" ] && success "Пинг до Яндекс DNS: ${PING_RESULT} ms" || warn "Пинг не получен"
+
+    info "Запускаем speedtest (3 теста × ~30 сек, займёт ~2 минуты)..."
+    /etc/vpn-balancer/speedtest.sh \
+        && SUCCESS_SPD=$(cat /etc/vpn-balancer/node_capacity 2>/dev/null) \
+        && success "Speedtest: ${SUCCESS_SPD} Mbps (среднее из 3 тестов)" \
+        || warn "Speedtest не удался — будет использован floor 100 Mbps"
 
     info "Устанавливаем команду balancer..."
     curl -4 -Ls "$BASE_URL/balancer.sh" -o /usr/local/bin/balancer
@@ -345,7 +447,6 @@ setup_node() {
 # ══════════════════════════════════════════════════════════════
 # ГЛАВНОЕ МЕНЮ — вызывается после определения функций
 # ══════════════════════════════════════════════════════════════
-clear
 echo ""
 echo -e "  ${BOLD}╔══════════════════════════════════════╗${NC}"
 echo -e "  ${BOLD}║     VPN Balancer Setup               ║${NC}"

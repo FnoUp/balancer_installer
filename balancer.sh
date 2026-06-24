@@ -41,7 +41,6 @@ BALANCER_LOG="/var/log/${SVC_NAME:-vpn-balancer}/balancer.log"
 # МЕНЮ НОДЫ
 # ══════════════════════════════════════════════════════════════
 show_menu_node() {
-    clear
     echo ""
     echo -e "  ${BOLD}╔══════════════════════════════════════╗${NC}"
     echo -e "  ${BOLD}║     VPN Balancer — нода              ║${NC}"
@@ -64,6 +63,8 @@ show_menu_node() {
     echo -e "  ${BLUE}4)${NC} Firewall метрик — кто видит порты 9100/8080"
     echo -e "       ${DIM}(должна быть только панель)${NC}"
     echo -e "  ${BLUE}5)${NC} Обновить команду balancer"
+    echo -e "  ${BLUE}6)${NC} Запустить speedtest вручную"
+    echo -e "       ${DIM}(3 теста, обновляет файл ёмкости канала)${NC}"
     echo ""
     echo -e "  ${DIM}0) Выйти${NC}"
     echo ""
@@ -133,6 +134,23 @@ handle_node() {
             || echo -e "  ${RED}[ERROR]${NC} Не удалось обновить"
         pause; show_menu_node
         ;;
+    # ── 6. Speedtest вручную ────────────────────────────────────
+    6)
+        if [ ! -f /etc/vpn-balancer/speedtest.sh ]; then
+            echo -e "  ${YELLOW}[WARN]${NC} /etc/vpn-balancer/speedtest.sh не найден"
+            echo -e "  Переустанови ноду чтобы создать скрипт (пункт 1)"
+            pause; show_menu_node; return
+        fi
+        echo -e "  ${BLUE}[INFO]${NC} Запускаем 3 теста speedtest (~2 мин)..."
+        echo ""
+        bash /etc/vpn-balancer/speedtest.sh
+        echo ""
+        RESULT=$(cat /etc/vpn-balancer/node_capacity 2>/dev/null)
+        [ -n "$RESULT" ] \
+            && echo -e "  ${GREEN}[OK]${NC} Результат: ${BOLD}${RESULT} Mbps${NC}" \
+            || echo -e "  ${YELLOW}[WARN]${NC} Результат не записан — проверь логи /var/log/vpn-speedtest.log"
+        pause; show_menu_node
+        ;;
     0) echo ""; exit 0 ;;
     *) show_menu_node ;;
     esac
@@ -142,7 +160,6 @@ handle_node() {
 # МЕНЮ ПАНЕЛИ
 # ══════════════════════════════════════════════════════════════
 show_menu() {
-    clear
     echo ""
     echo -e "  ${BOLD}╔══════════════════════════════════════╗${NC}"
     echo -e "  ${BOLD}║     VPN Balancer — управление        ║${NC}"
