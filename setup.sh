@@ -267,8 +267,23 @@ setup_node() {
     fi
 
     echo ""
+    echo -e "  В какой пул войдёт нода?"
+    echo ""
+    echo -e "    ${BLUE}1)${NC} BALANCER        — основной трафик ${YELLOW}(по умолчанию)${NC}"
+    echo -e "    ${BLUE}2)${NC} BALANCER_WIFI   — для WiFi-клиентов"
+    echo -e "    ${BLUE}3)${NC} BALANCER_MOBILE — для мобильных клиентов"
+    echo ""
+    read -rp "  Выбор (Enter = 1): " POOL_CHOICE
+    case "${POOL_CHOICE:-1}" in
+        2) NODE_POOL_TAG="BALANCER_WIFI" ;;
+        3) NODE_POOL_TAG="BALANCER_MOBILE" ;;
+        *) NODE_POOL_TAG="BALANCER" ;;
+    esac
+
+    echo ""
     info "Панель:     $PANEL_IP"
     info "Интерфейс:  $NET_DEV"
+    info "Пул:        $NODE_POOL_TAG"
     echo ""
     read -rp "  Всё верно? (y = установить, n = ввести заново, q = выйти): " CONFIRM
     [[ "$CONFIRM" == "q" ]] && { echo "Выход."; exit 0; }
@@ -320,9 +335,14 @@ setup_node() {
     iptables-save > /etc/iptables/rules.v4
     success "Порты закрыты, доступны только с $PANEL_IP"
 
+    # ── Сохраняем конфиг ноды ─────────────────────────────────────
+    mkdir -p /etc/vpn-balancer
+    echo "NODE_POOL_TAG=$NODE_POOL_TAG" > /etc/vpn-balancer/node_config
+    success "Конфиг ноды сохранён: /etc/vpn-balancer/node_config"
+
     # ── Textfile collector для node_exporter ──────────────────────
     TEXTFILE_DIR="/var/lib/prometheus/node-exporter"
-    mkdir -p "$TEXTFILE_DIR" /etc/vpn-balancer
+    mkdir -p "$TEXTFILE_DIR"
     DEFAULTS="/etc/default/prometheus-node-exporter"
     if [ -f "$DEFAULTS" ]; then
         grep -q "textfile" "$DEFAULTS" || \
@@ -441,6 +461,7 @@ CRON_EOF
     echo ""
     echo -e "    IP ноды:    ${YELLOW}$NODE_IP${NC}"
     echo -e "    Интерфейс:  ${YELLOW}$NET_DEV${NC}"
+    echo -e "    Пул:        ${YELLOW}$NODE_POOL_TAG${NC}"
     echo ""
     echo -e "  Не забудь создать ноду и хост в Remnawave, скопировать UUID хоста"
     echo ""

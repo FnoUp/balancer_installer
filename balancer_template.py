@@ -368,9 +368,10 @@ def send_daily_log():
 # ── Проверка ноды ──────────────────────────────────────────────
 
 def check_node(node, nodes_in_pool):
-    name    = node["name"]
-    uuid    = node["host_uuid"]
-    in_pool = node_state.get(uuid, True)
+    name     = node["name"]
+    uuid     = node["host_uuid"]
+    node_tag = node.get("pool_tag", BALANCER_TAG)
+    in_pool  = node_state.get(uuid, True)
 
     # Определяем возраст ноды (сколько секунд она в системе)
     if uuid not in _first_seen:
@@ -387,7 +388,7 @@ def check_node(node, nodes_in_pool):
 
     m = metrics
     score, detail = calc_score(m, active_users)
-    log.info(f"{name}: score={score} users={'?' if active_users is None else active_users} | {detail}")
+    log.info(f"{name} [{node_tag}]: score={score} users={'?' if active_users is None else active_users} | {detail}")
 
     # ── Алерты ──────────────────────────────────────────────────
 
@@ -460,21 +461,22 @@ def check_node(node, nodes_in_pool):
             return
         if set_host_tag(uuid, ""):
             node_state[uuid] = False
-            log.warning(f"{name}: ВЫВЕДЕНА из пула | score={score}")
+            log.warning(f"{name}: ВЫВЕДЕНА из пула [{node_tag}] | score={score}")
             tg_metrics(
                 f"🔴 <b>Нода выведена из пула</b>\nНода: <b>{name}</b>\n"
                 f"Score: <code>{score}</code> (порог {SCORE_BAD})\n<code>{detail}</code>"
             )
-            if not any(node_state.values()):
+            same_pool = [n["host_uuid"] for n in NODES if n.get("pool_tag", BALANCER_TAG) == node_tag]
+            if not any(node_state.get(u, False) for u in same_pool):
                 tg_critical(
                     f"🚨 <b>СЕРВИС НЕДОСТУПЕН — все ноды упали</b>\n"
-                    f"Пул пуст, подключения невозможны.\n"
+                    f"Пул: <code>{node_tag}</code>  подключения невозможны.\n"
                     f"Последней выведена: <b>{name}</b>  score=<code>{score}</code>\n"
                     f"<code>{detail}</code>"
                 )
 
     elif score < SCORE_GOOD and not in_pool:
-        if set_host_tag(uuid, BALANCER_TAG):
+        if set_host_tag(uuid, node_tag):
             node_state[uuid] = True
             log.info(f"{name}: ВОЗВРАЩЕНА в пул | score={score}")
             tg_metrics(
@@ -493,7 +495,8 @@ def sync_state():
         for node in NODES:
             host = next((h for h in hosts if h["uuid"] == node["host_uuid"]), None)
             if host:
-                in_pool = host.get("tag") == BALANCER_TAG
+                node_tag = node.get("pool_tag", BALANCER_TAG)
+                in_pool = host.get("tag") == node_tag
                 node_state[node["host_uuid"]] = in_pool
                 log.info(f"{node['name']}: {'в пуле' if in_pool else 'вне пула'}")
             else:
@@ -516,8 +519,10 @@ def main():
                 send_daily_log()
                 last_digest_day = now.day
             for node in NODES:
-                active = [uuid for uuid, s in node_state.items() if s]
-                check_node(node, active)
+                node_tag = node.get("pool_tag", BALANCER_TAG)
+                pool_uuids = [n["host_uuid"] for n in NODES if n.get("pool_tag", BALANCER_TAG) == node_tag]
+                active_in_pool = [u for u in pool_uuids if node_state.get(u, True)]
+                check_node(node, active_in_pool)
         except Exception as e:
             log.error(f"Ошибка главного цикла: {e}")
         time.sleep(CHECK_INTERVAL)

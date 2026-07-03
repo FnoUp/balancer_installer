@@ -127,6 +127,21 @@ while True:
     if not host_uuid:
         print("UUID не может быть пустым"); continue
 
+    # Выбор пула
+    print()
+    print("  В какой пул добавить ноду?")
+    print()
+    print("    1) BALANCER        — основной трафик  (по умолчанию)")
+    print("    2) BALANCER_WIFI   — WiFi-клиенты")
+    print("    3) BALANCER_MOBILE — мобильные клиенты")
+    print()
+    while True:
+        pool_input = input("  Выбор (Enter = 1): ").strip() or "1"
+        if pool_input in ("1", "2", "3"):
+            break
+        print("  Введи 1, 2 или 3")
+    pool_tag = {"1": "BALANCER", "2": "BALANCER_WIFI", "3": "BALANCER_MOBILE"}[pool_input]
+
     # Получаем remark из Remnawave автоматически
     rw_remark = rw_get_host_remark(host_uuid)
     if rw_remark:
@@ -143,6 +158,7 @@ while True:
     info(f"Локация:    {location}")
     info(f"Интерфейс:  {net_dev}")
     info(f"Host UUID:  {host_uuid}")
+    info(f"Пул:        {pool_tag}")
     info(f"TG имя:     {tg_name}")
     print("─" * 50)
     print()
@@ -278,6 +294,7 @@ new_node_code = f"""    {{
         "prom_instance": "{node_ip}:9100",
         "ping_instance": "{node_ip}",
         "net_device":    "{net_dev}",
+        "pool_tag":      "{pool_tag}",
     }},"""
 
 with open(BALANCER_FILE, "r") as f:
