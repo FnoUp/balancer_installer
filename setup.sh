@@ -450,7 +450,7 @@ setup_node() {
 #!/bin/bash
 TEXTFILE_DIR="/var/lib/prometheus/node-exporter"
 mkdir -p "$TEXTFILE_DIR"
-RESULT=$(ping -c 5 -q 77.88.8.8 2>/dev/null | tail -1)
+RESULT=$(ping -c 3 -q 77.88.8.8 2>/dev/null | tail -1)
 if [ -n "$RESULT" ]; then
     PING_MS=$(echo "$RESULT" | awk -F/ '{printf "%.2f", $5}')
     PING_OK=1
