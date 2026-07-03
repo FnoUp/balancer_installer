@@ -59,26 +59,31 @@ setup_panel() {
         TG_TOKEN=$(get_env    "$BD_ENV" "BOT_TOKEN")
         TG_ERR_CHAT=$(get_env "$BD_ENV" "ADMIN_NOTIFICATIONS_CHAT_ID")
         TG_ERR_TOP=$(get_env  "$BD_ENV" "ADMIN_NOTIFICATIONS_ERRORS_TOPIC_ID")
-        TG_REP_CHAT=$(get_env "$BD_ENV" "ADMIN_REPORTS_CHAT_ID")
         TG_REP_TOP=$(get_env  "$BD_ENV" "ADMIN_REPORTS_TOPIC_ID")
         [ -n "$TG_TOKEN"    ] && success "TG Bot Token найден автоматически"
-        [ -n "$TG_ERR_CHAT" ] && success "TG Errors Chat: $TG_ERR_CHAT (topic: $TG_ERR_TOP)"
-        [ -n "$TG_REP_CHAT" ] && success "TG Reports Chat: $TG_REP_CHAT (topic: $TG_REP_TOP)"
+        [ -n "$TG_ERR_CHAT" ] && success "TG Chat ID найден автоматически: $TG_ERR_CHAT"
     fi
 
-    [ -z "$TG_TOKEN"    ] && { read -rp "  TG Bot Token: " TG_TOKEN; }
-    [ -z "$TG_ERR_CHAT" ] && { read -rp "  TG Errors Chat ID: " TG_ERR_CHAT; }
-    [ -z "$TG_ERR_TOP"  ] && { read -rp "  TG Errors Topic ID: " TG_ERR_TOP; }
-    [ -z "$TG_REP_CHAT" ] && { read -rp "  TG Reports Chat ID: " TG_REP_CHAT; }
-    [ -z "$TG_REP_TOP"  ] && { read -rp "  TG Reports Topic ID: " TG_REP_TOP; }
+    [ -z "$TG_TOKEN" ] && { read -rp "  TG Bot Token: " TG_TOKEN; }
 
-    # ── Топик метрик балансировщика (чат тот же что у бота) ───
+    # ── Чат один общий для метрик/ошибок/отчётов, отличаются топики ──
     echo ""
+    echo -e "  ${YELLOW}Один чат используется для всех уведомлений — топики внутри него разные${NC}"
+    CHAT_DEFAULT="${TG_ERR_CHAT:--1003978283456}"
+    read -rp "  TG Chat ID (Enter = $CHAT_DEFAULT): " TG_CHAT_INPUT
+    TG_ERR_CHAT="${TG_CHAT_INPUT:-$CHAT_DEFAULT}"
+    TG_REP_CHAT="$TG_ERR_CHAT"
     TG_MET_CHAT="$TG_ERR_CHAT"
-    [ -n "$TG_MET_CHAT" ] && success "Metrics Chat ID: $TG_MET_CHAT (тот же чат, что у бота)"
-    [ -z "$TG_MET_CHAT" ] && { read -rp "  Metrics Chat ID: " TG_MET_CHAT; }
-    echo -e "  ${YELLOW}Укажи топик для алертов балансировщика (создай отдельный топик в этом чате)${NC}"
-    read -rp "  Metrics Topic ID (Enter = 0, без топика): " TG_MET_TOP
+
+    ERR_TOP_DEFAULT="${TG_ERR_TOP:-233}"
+    read -rp "  Topic ID — Ошибки/критика  (Enter = $ERR_TOP_DEFAULT): " TG_ERR_TOP_INPUT
+    TG_ERR_TOP="${TG_ERR_TOP_INPUT:-$ERR_TOP_DEFAULT}"
+
+    REP_TOP_DEFAULT="${TG_REP_TOP:-6}"
+    read -rp "  Topic ID — Отчёты          (Enter = $REP_TOP_DEFAULT): " TG_REP_TOP_INPUT
+    TG_REP_TOP="${TG_REP_TOP_INPUT:-$REP_TOP_DEFAULT}"
+
+    read -rp "  Topic ID — Метрики (Enter = 0, без топика): " TG_MET_TOP
     TG_MET_TOP="${TG_MET_TOP:-0}"
 
     # ── Remnawave API токен ────────────────────────────────────
@@ -104,9 +109,8 @@ setup_panel() {
     echo -e "  ── Параметры ──────────────────────────────────────────"
     info "Сервис:        $SVC_NAME  |  Тег: $BALANCER_TAG"
     info "Домен:         $DOMAIN"
-    info "Metrics Chat:  $TG_MET_CHAT (topic: $TG_MET_TOP)"
-    info "Errors Chat:   $TG_ERR_CHAT (topic: $TG_ERR_TOP)"
-    info "Reports Chat:  $TG_REP_CHAT (topic: $TG_REP_TOP)"
+    info "TG Chat:       $TG_ERR_CHAT"
+    info "  Метрики topic: $TG_MET_TOP  |  Ошибки topic: $TG_ERR_TOP  |  Отчёты topic: $TG_REP_TOP"
     echo "  ───────────────────────────────────────────────────────"
     echo ""
     read -rp "  Всё верно? (y = установить, n = ввести заново, q = выйти): " CONFIRM
