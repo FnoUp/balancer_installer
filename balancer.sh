@@ -302,76 +302,251 @@ handle() {
 import re, sys
 BALANCER_PY = sys.argv[1]
 try:
-    content = open(BALANCER_PY).read()
+    content = open(BALANCER_PY, encoding="utf-8").read()
 except FileNotFoundError:
     print("  balancer.py не найден"); sys.exit(0)
-nodes = re.findall(r'"name"\s*:\s*"([^"]+)".*?"prom_instance"\s*:\s*"([^"]+)"', content, re.DOTALL)
+blocks = re.findall(r'\{[^{}]*\}', content, re.DOTALL)
+nodes = [b for b in blocks if '"prom_instance"' in b]
 if not nodes:
     print("  Ноды не найдены — список NODES пуст")
     sys.exit(0)
-for i, (name, prom) in enumerate(nodes, 1):
-    print(f"    {i}) {name}  ({prom})")
+def field(b, k):
+    m = re.search(r'"' + k + r'"\s*:\s*"([^"]*)"', b)
+    return m.group(1) if m else "?"
+for i, b in enumerate(nodes, 1):
+    ip = field(b, "prom_instance").split(":")[0]
+    print(f"    {i}) {field(b,'name'):<18} IP={ip:<16} пул={field(b,'pool_tag')}")
 PYEOF
         echo ""
-        read -rp "  Номер ноды для исправления (Enter = отмена): " NODE_NUM
+        read -rp "  Номер ноды (Enter = отмена): " NODE_NUM
         if [ -z "$NODE_NUM" ]; then
             show_menu; return
         fi
 
-        NODE_IP=$(python3 - "$BALANCER_PY" "$NODE_NUM" << 'PYEOF'
-import re, sys
-BALANCER_PY, idx = sys.argv[1], int(sys.argv[2])
-content = open(BALANCER_PY).read()
-nodes = re.findall(r'"name"\s*:\s*"[^"]+".*?"prom_instance"\s*:\s*"([^":]+):', content, re.DOTALL)
-if 1 <= idx <= len(nodes):
-    print(nodes[idx - 1])
+        NODE_INFO=$(python3 - "$BALANCER_PY" "$TARGETS_DIR" "$NODE_NUM" << 'PYEOF'
+import re, sys, os
+BALANCER_PY, TARGETS_DIR, idx = sys.argv[1], sys.argv[2], int(sys.argv[3])
+content = open(BALANCER_PY, encoding="utf-8").read()
+blocks = re.findall(r'\{[^{}]*\}', content, re.DOTALL)
+nodes = [b for b in blocks if '"prom_instance"' in b]
+if not (1 <= idx <= len(nodes)):
+    print("ERROR")
+    sys.exit(0)
+b = nodes[idx - 1]
+def field(k):
+    m = re.search(r'"' + k + r'"\s*:\s*"([^"]*)"', b)
+    return m.group(1) if m else ""
+ip = field("prom_instance").split(":")[0]
+loc = ""
+vpn_yml = os.path.join(TARGETS_DIR, "vpn_nodes.yml")
+if ip and os.path.exists(vpn_yml):
+    fc = open(vpn_yml, encoding="utf-8").read()
+    for blk in re.split(r'(?=^- targets:)', fc, flags=re.MULTILINE):
+        if ip in blk:
+            mloc = re.search(r'location:\s*"([^"]*)"', blk)
+            loc = mloc.group(1) if mloc else ""
+            break
+print("\t".join([field("name"), ip, loc, field("net_device"), field("host_uuid"), field("pool_tag")]))
 PYEOF
         )
-        if [ -z "$NODE_IP" ]; then
+        if [ "$NODE_INFO" = "ERROR" ] || [ -z "$NODE_INFO" ]; then
             echo -e "  ${RED}[ERROR]${NC} Неверный номер"
             pause; show_menu; return
         fi
+        IFS=$'\t' read -r CUR_NAME CUR_IP CUR_LOC CUR_IFACE CUR_UUID CUR_POOL <<< "$NODE_INFO"
 
-        echo -e "  ${YELLOW}Нода с IP $NODE_IP будет удалена из всех конфигов${NC}"
-        read -rp "  Подтвердить? (yes/n): " CONFIRM
-        if [ "$CONFIRM" != "yes" ]; then
-            echo "  Отмена."
-            pause; show_menu; return
-        fi
+        echo ""
+        echo -e "  ${BOLD}Текущие настройки — $CUR_NAME:${NC}"
+        echo -e "    1) Имя:        $CUR_NAME"
+        echo -e "    2) IP:         $CUR_IP"
+        echo -e "    3) Локация:    $CUR_LOC"
+        echo -e "    4) Интерфейс:  $CUR_IFACE"
+        echo -e "    5) UUID:       $CUR_UUID"
+        echo -e "    6) Пул:        $CUR_POOL"
+        echo -e "    7) ${YELLOW}Всё сразу${NC} (удалить ноду и ввести заново)"
+        echo -e "    0) Отмена"
+        echo ""
+        read -rp "  Что изменить? " FIELD_CHOICE
 
-        python3 - "$BALANCER_PY" "$TARGETS_DIR" "$NODE_IP" << 'PYEOF'
+        case "$FIELD_CHOICE" in
+        1)
+            read -rp "  Новое имя (Enter = $CUR_NAME): " NEW_VAL
+            NEW_VAL="${NEW_VAL:-$CUR_NAME}"
+            FIELD="name"
+            ;;
+        2)
+            read -rp "  Новый IP (Enter = $CUR_IP): " NEW_VAL
+            NEW_VAL="${NEW_VAL:-$CUR_IP}"
+            FIELD="ip"
+            ;;
+        3)
+            read -rp "  Новая локация (Enter = $CUR_LOC): " NEW_VAL
+            NEW_VAL="${NEW_VAL:-$CUR_LOC}"
+            FIELD="location"
+            ;;
+        4)
+            echo ""
+            echo -e "    1) eth0"
+            echo -e "    2) ens3"
+            echo -e "    3) другой  ${DIM}(текущий: $CUR_IFACE)${NC}"
+            read -rp "  Выбор (Enter = оставить $CUR_IFACE): " IFACE_CHOICE
+            case "$IFACE_CHOICE" in
+                1) NEW_VAL="eth0" ;;
+                2) NEW_VAL="ens3" ;;
+                3) read -rp "  Интерфейс: " NEW_VAL; NEW_VAL="${NEW_VAL:-$CUR_IFACE}" ;;
+                *) NEW_VAL="$CUR_IFACE" ;;
+            esac
+            FIELD="iface"
+            ;;
+        5)
+            read -rp "  Новый UUID (Enter = $CUR_UUID): " NEW_VAL
+            NEW_VAL="${NEW_VAL:-$CUR_UUID}"
+            FIELD="uuid"
+            ;;
+        6)
+            echo ""
+            echo -e "    1) BALANCER"
+            echo -e "    2) BALANCER_WIFI"
+            echo -e "    3) BALANCER_MOBILE"
+            read -rp "  Выбор (Enter = оставить $CUR_POOL): " POOL_CHOICE
+            case "$POOL_CHOICE" in
+                1) NEW_VAL="BALANCER" ;;
+                2) NEW_VAL="BALANCER_WIFI" ;;
+                3) NEW_VAL="BALANCER_MOBILE" ;;
+                *) NEW_VAL="$CUR_POOL" ;;
+            esac
+            FIELD="pool"
+            ;;
+        7)
+            echo -e "  ${YELLOW}Нода \"$CUR_NAME\" ($CUR_IP) будет удалена из всех конфигов${NC}"
+            read -rp "  Подтвердить? (yes/n): " CONFIRM
+            if [ "$CONFIRM" != "yes" ]; then
+                echo "  Отмена."
+                pause; show_menu; return
+            fi
+            python3 - "$BALANCER_PY" "$TARGETS_DIR" "$CUR_IP" << 'PYEOF'
 import re, sys, os
 BALANCER_PY, TARGETS_DIR, IP = sys.argv[1], sys.argv[2], sys.argv[3]
 
 def remove_ip_from_yml(path, ip):
     if not os.path.exists(path):
         return
-    content = open(path).read()
+    content = open(path, encoding="utf-8").read()
     if ip not in content:
         return
     blocks = re.split(r'(?=^- targets:)', content, flags=re.MULTILINE)
     blocks = [b for b in blocks if ip not in b]
-    open(path, "w").write("".join(blocks))
+    open(path, "w", encoding="utf-8").write("".join(blocks))
 
 for fname in ("vpn_nodes.yml", "docker.yml", "ping.yml"):
     remove_ip_from_yml(os.path.join(TARGETS_DIR, fname), IP)
 
-content = open(BALANCER_PY).read()
+content = open(BALANCER_PY, encoding="utf-8").read()
 new_content = re.sub(
     r'\s*\{[^}]*"prom_instance":\s*"' + re.escape(IP) + r':[^}]*\},?',
     "", content, flags=re.DOTALL,
 )
-open(BALANCER_PY, "w").write(new_content)
+open(BALANCER_PY, "w", encoding="utf-8").write(new_content)
 PYEOF
+            systemctl restart prometheus 2>/dev/null || true
+            systemctl restart "$BALANCER_SVC" 2>/dev/null || true
+            echo -e "  ${GREEN}[OK]${NC} Нода удалена из конфигов"
+            echo ""
+            echo -e "  ${BLUE}[INFO]${NC} Введи данные заново:"
+            echo ""
+            [ ! -f "$ADD_NODE_PY" ] && curl -4 -Ls "$BASE_URL/add_node.py" -o "$ADD_NODE_PY"
+            python3 "$ADD_NODE_PY"
+            pause; show_menu
+            return
+            ;;
+        *)
+            echo "  Отмена."
+            pause; show_menu; return
+            ;;
+        esac
 
-        systemctl restart prometheus 2>/dev/null || true
+        # ── Точечно меняем одно поле, не трогая остальные ────────────
+        python3 - "$BALANCER_PY" "$TARGETS_DIR" "$FIELD" "$NODE_NUM" "$NEW_VAL" << 'PYEOF'
+import re, sys, os
+
+BALANCER_PY, TARGETS_DIR, FIELD, IDX, NEW_VAL = sys.argv[1:6]
+IDX = int(IDX)
+
+content = open(BALANCER_PY, encoding="utf-8").read()
+blocks = list(re.finditer(r'\{[^{}]*\}', content, re.DOTALL))
+node_blocks = [m for m in blocks if '"prom_instance"' in m.group(0)]
+
+if not (1 <= IDX <= len(node_blocks)):
+    print("ERROR: неверный номер ноды")
+    sys.exit(1)
+
+m = node_blocks[IDX - 1]
+block = m.group(0)
+
+def get_field(b, key):
+    mm = re.search(r'"' + key + r'"\s*:\s*"([^"]*)"', b)
+    return mm.group(1) if mm else ""
+
+old_ip = get_field(block, "prom_instance").split(":")[0]
+field_key_map = {"name": "name", "uuid": "host_uuid", "iface": "net_device", "pool": "pool_tag"}
+
+new_block = block
+if FIELD == "ip":
+    new_block = re.sub(r'("prom_instance"\s*:\s*")([^":]+)(:)',
+                        lambda mm: mm.group(1) + NEW_VAL + mm.group(3), new_block)
+    new_block = re.sub(r'("ping_instance"\s*:\s*")([^"]+)(")',
+                        lambda mm: mm.group(1) + NEW_VAL + mm.group(3), new_block)
+elif FIELD == "location":
+    pass
+elif FIELD in field_key_map:
+    key = field_key_map[FIELD]
+    new_block = re.sub(r'("' + key + r'"\s*:\s*")([^"]*)(")',
+                        lambda mm: mm.group(1) + NEW_VAL + mm.group(3), new_block)
+else:
+    print("ERROR: неизвестное поле")
+    sys.exit(1)
+
+if new_block != block:
+    content = content[:m.start()] + new_block + content[m.end():]
+    open(BALANCER_PY, "w", encoding="utf-8").write(content)
+
+if FIELD in ("ip", "name", "location") and old_ip:
+    for fname in ("vpn_nodes.yml", "docker.yml", "ping.yml"):
+        path = os.path.join(TARGETS_DIR, fname)
+        if not os.path.exists(path):
+            continue
+        fcontent = open(path, encoding="utf-8").read()
+        yblocks = re.split(r'(?=^- targets:)', fcontent, flags=re.MULTILINE)
+        changed = False
+        for i, b in enumerate(yblocks):
+            if old_ip not in b:
+                continue
+            if FIELD == "ip":
+                yblocks[i] = b.replace(old_ip, NEW_VAL)
+                changed = True
+            elif FIELD == "name":
+                yblocks[i] = re.sub(r'(name:\s*")[^"]*(")',
+                                     lambda mm: mm.group(1) + NEW_VAL + mm.group(2), b)
+                changed = True
+            elif FIELD == "location" and "location:" in b:
+                yblocks[i] = re.sub(r'(location:\s*")[^"]*(")',
+                                     lambda mm: mm.group(1) + NEW_VAL + mm.group(2), b)
+                changed = True
+        if changed:
+            open(path, "w", encoding="utf-8").write("".join(yblocks))
+
+print("OK")
+PYEOF
+        PATCH_OK=$?
+        if [ "$PATCH_OK" -ne 0 ]; then
+            echo -e "  ${RED}[ERROR]${NC} Не удалось изменить поле"
+            pause; show_menu; return
+        fi
+
+        [ "$FIELD" = "ip" ] || [ "$FIELD" = "name" ] || [ "$FIELD" = "location" ] \
+            && { systemctl restart prometheus 2>/dev/null || true; }
         systemctl restart "$BALANCER_SVC" 2>/dev/null || true
-        echo -e "  ${GREEN}[OK]${NC} Нода удалена из конфигов"
-        echo ""
-        echo -e "  ${BLUE}[INFO]${NC} Введи данные заново:"
-        echo ""
-        [ ! -f "$ADD_NODE_PY" ] && curl -4 -Ls "$BASE_URL/add_node.py" -o "$ADD_NODE_PY"
-        python3 "$ADD_NODE_PY"
+        echo -e "  ${GREEN}[OK]${NC} Изменено: $FIELD = $NEW_VAL"
         pause; show_menu
         ;;
 

@@ -320,8 +320,16 @@ setup_node() {
     done < <(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^lo$|^docker|^veth|^br-|^virbr')
 
     if [ "${#IFACES[@]}" -eq 0 ]; then
-        warn "Не удалось определить интерфейс, используем eth0"
-        NET_DEV="eth0"
+        warn "Не удалось определить интерфейс автоматически"
+        echo -e "    1) eth0  ${YELLOW}(по умолчанию)${NC}"
+        echo -e "    2) ens3"
+        echo -e "    3) ввести другой"
+        read -rp "  Выбор (Enter = 1): " IFACE_CHOICE
+        case "${IFACE_CHOICE:-1}" in
+            2) NET_DEV="ens3" ;;
+            3) read -rp "  Интерфейс: " NET_DEV; NET_DEV="${NET_DEV:-eth0}" ;;
+            *) NET_DEV="eth0" ;;
+        esac
     elif [ "${#IFACES[@]}" -eq 1 ]; then
         NET_DEV="${IFACES[0]}"
         IFACE_IP=$(ip -4 addr show "$NET_DEV" 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
