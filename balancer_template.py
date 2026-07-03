@@ -36,6 +36,7 @@ MIN_SPEEDTEST     = 100.0  # ниже этого → штраф capacity=50 + а
 SPEEDTEST_WARN    = 100.0  # порог для TG-алерта
 NODE_GRACE_PERIOD = 86400  # секунд = 24ч grace для новых нод
 FIRST_SEEN_FILE   = "/etc/vpn-balancer/node_first_seen.json"
+LAST_DIGEST_FILE  = "/etc/vpn-balancer/last_digest_date"
 
 W_PING = 0.25
 W_BW   = 0.50
@@ -59,7 +60,6 @@ node_state      = {}
 node_alerts     = {}
 last_prom_alert = 0
 last_api_alert  = 0
-last_digest_day = -1
 _hosts_cache    = {"data": [], "ts": 0.0}
 _nodes_cache    = {"data": [], "ts": 0.0}
 
@@ -75,7 +75,18 @@ def _save_first_seen(data):
     with open(FIRST_SEEN_FILE, "w") as _f:
         json.dump(data, _f)
 
-_first_seen = _load_first_seen()
+def _load_last_digest_date():
+    try:
+        return Path(LAST_DIGEST_FILE).read_text().strip()
+    except FileNotFoundError:
+        return ""
+
+def _save_last_digest_date(date_str):
+    Path(LAST_DIGEST_FILE).parent.mkdir(parents=True, exist_ok=True)
+    Path(LAST_DIGEST_FILE).write_text(date_str)
+
+_first_seen      = _load_first_seen()
+last_digest_date = _load_last_digest_date()
 
 # ── Telegram ───────────────────────────────────────────────────
 
@@ -322,7 +333,7 @@ def calc_score(m, active_users=0):
 # ── Дайджест ───────────────────────────────────────────────────
 
 def send_daily_digest():
-    date_str = datetime.datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+    date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
     lines = [f"📊 <b>Дайджест нод — {date_str}</b>\n"]
     for node in NODES:
         name    = node["name"]
@@ -349,7 +360,7 @@ def send_daily_digest():
 
 def send_daily_log():
     try:
-        today    = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+        today    = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         log_path = Path(LOG_FILE)
         if not log_path.exists():
             return
@@ -507,17 +518,19 @@ def sync_state():
 # ── Main ───────────────────────────────────────────────────────
 
 def main():
-    global last_digest_day
+    global last_digest_date
     log.info("=== VPN Balancer запущен ===")
     tg_metrics("🚀 <b>VPN Balancer запущен</b>\nМониторинг нод активен.")
     sync_state()
     while True:
         try:
-            now = datetime.datetime.utcnow()
-            if now.hour == DIGEST_HOUR and now.day != last_digest_day:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            today_str = now.strftime("%Y-%m-%d")
+            if now.hour == DIGEST_HOUR and today_str != last_digest_date:
                 send_daily_digest()
                 send_daily_log()
-                last_digest_day = now.day
+                last_digest_date = today_str
+                _save_last_digest_date(today_str)
             for node in NODES:
                 node_tag = node.get("pool_tag", BALANCER_TAG)
                 pool_uuids = [n["host_uuid"] for n in NODES if n.get("pool_tag", BALANCER_TAG) == node_tag]

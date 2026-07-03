@@ -167,6 +167,8 @@ show_menu() {
     echo ""
     echo -e "  балансировщик  $(svc_status $BALANCER_SVC)"
     echo -e "  prometheus     $(svc_status prometheus)"
+    echo -e "  blackbox       $(docker ps --filter name=blackbox-exporter --format '●' 2>/dev/null | grep -q '●' \
+        && echo -e "${GREEN}● работает${NC}" || echo -e "${RED}● остановлен${NC}")"
     echo ""
     echo -e "  ${DIM}── Установка ─────────────────────────────${NC}"
     echo -e "  ${BLUE}1)${NC} Установить / обновить балансировщик"
@@ -182,6 +184,7 @@ show_menu() {
     echo -e "  ${BLUE}6)${NC} Логи балансировщика (live)"
     echo -e "  ${BLUE}7)${NC} Перезапустить балансировщик"
     echo -e "  ${BLUE}8)${NC} Перезапустить Prometheus"
+    echo -e "  ${BLUE}9)${NC} Перезапустить blackbox-exporter"
     echo ""
     echo -e "  ${DIM}0) Выйти${NC}"
     echo ""
@@ -446,6 +449,14 @@ PYEOF
         systemctl restart prometheus \
             && echo -e "  ${GREEN}[OK]${NC} Prometheus перезапущен" \
             || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
+        sleep 1; show_menu
+        ;;
+
+    # ── 9. Перезапустить blackbox-exporter ────────────────────────
+    9)
+        docker restart blackbox-exporter 2>/dev/null \
+            && echo -e "  ${GREEN}[OK]${NC} blackbox-exporter перезапущен" \
+            || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить (контейнер не найден?)"
         sleep 1; show_menu
         ;;
 

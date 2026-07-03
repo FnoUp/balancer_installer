@@ -20,6 +20,7 @@ TARGETS_DIR = "/etc/prometheus/targets"
 # Читаем конфиг, созданный setup.sh
 SVC_NAME = "vpn-balancer"
 BALANCER_TAG = "BALANCER"
+BALANCER_NAME = "vpn-balancer"
 _config = "/etc/vpn-balancer/config"
 if os.path.exists(_config):
     with open(_config) as _f:
@@ -28,6 +29,8 @@ if os.path.exists(_config):
                 SVC_NAME = _line.strip().split("=", 1)[1]
             elif _line.startswith("BALANCER_TAG="):
                 BALANCER_TAG = _line.strip().split("=", 1)[1]
+            elif _line.startswith("BALANCER_NAME="):
+                BALANCER_NAME = _line.strip().split("=", 1)[1]
 
 BALANCER_FILE = f"/opt/{SVC_NAME}/balancer.py"
 BALANCER_LOG  = f"/var/log/{SVC_NAME}/balancer.log"
@@ -362,11 +365,13 @@ def _tg_notify_node_added():
             if _m:
                 _ping_avg = f"{float(_m.group(1)):.0f}ms"
         _text = (
+            f"⚙️ <b>{BALANCER_NAME}</b>\n"
             f"🟢 <b>Новая нода подключена</b>\n"
             f"Нода: <b>{tg_name}</b>\n"
             f"IP: <code>{node_ip}</code>\n"
             f"Локация: {location}\n"
             f"Интерфейс: {net_dev}\n"
+            f"Пул: <code>{pool_tag}</code>\n"
             f"Пинг (с панели): <code>{_ping_avg}</code>\n"
             f"Prometheus добавлен, балансировщик перезапущен"
         )

@@ -192,6 +192,9 @@ PYEOF
     docker run -d --name blackbox-exporter --restart=always \
         -p 127.0.0.1:9115:9115 prom/blackbox-exporter
 
+    if [ -f /etc/prometheus/prometheus.yml ]; then
+        cp /etc/prometheus/prometheus.yml "/etc/prometheus/prometheus.yml.bak.$(date +%F-%H%M%S)"
+    fi
     info "Пишем /etc/prometheus/prometheus.yml..."
     cat > /etc/prometheus/prometheus.yml << 'PROM_EOF'
 global:
@@ -261,6 +264,18 @@ EOF
     systemctl daemon-reload
     systemctl enable "$SVC_NAME"
     systemctl start "$SVC_NAME"
+
+    info "Настраиваем ротацию логов..."
+    cat > "/etc/logrotate.d/$SVC_NAME" << EOF
+$LOG_DIR/*.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
 
     info "Сохраняем конфиг балансировщика..."
     mkdir -p /etc/vpn-balancer
@@ -373,6 +388,11 @@ setup_node() {
         && success "node_exporter запущен" \
         || error "node_exporter не запустился"
 
+    info "Устанавливаем speedtest-cli..."
+    apt-get install -y speedtest-cli \
+        && success "speedtest-cli установлен" \
+        || warn "speedtest-cli не поставился — capacity будет считаться по трафику (tx_p95)"
+
     if ! command -v docker &>/dev/null; then
         warn "Docker не найден — устанавливаем..."
         curl -fsSL https://get.docker.com | sh
@@ -457,7 +477,7 @@ CAPACITY_FILE="/etc/vpn-balancer/node_capacity"
 LOG="/var/log/vpn-speedtest.log"
 mkdir -p "$TEXTFILE_DIR"
 
-command -v speedtest-cli &>/dev/null || pip3 install speedtest-cli -q 2>/dev/null
+command -v speedtest-cli &>/dev/null || apt-get install -y speedtest-cli -qq 2>/dev/null
 
 echo "$(date): Запускаем 3 теста..." >> "$LOG"
 RESULTS=()
@@ -498,6 +518,18 @@ SPD_EOF
 */5 * * * * root /etc/vpn-balancer/ping_metrics.sh
 0 */8 * * * root /etc/vpn-balancer/speedtest.sh
 CRON_EOF
+
+    # ── Ротация лога speedtest ───────────────────────────────────────
+    cat > /etc/logrotate.d/vpn-speedtest << 'LOGROTATE_EOF'
+/var/log/vpn-speedtest.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+LOGROTATE_EOF
 
     # ── Первый запуск ──────────────────────────────────────────────
     info "Замеряем пинг до 77.88.8.8..."
