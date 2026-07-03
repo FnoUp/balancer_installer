@@ -174,12 +174,14 @@ show_menu() {
     echo ""
     echo -e "  ${DIM}── Ноды ──────────────────────────────────${NC}"
     echo -e "  ${BLUE}3)${NC} Добавить новую ноду"
-    echo -e "  ${BLUE}4)${NC} Статус нод и score"
+    echo -e "  ${BLUE}4)${NC} Исправить/удалить ноду"
+    echo -e "       ${DIM}(если ошибся при вводе — удалит и даст ввести заново)${NC}"
+    echo -e "  ${BLUE}5)${NC} Статус нод и score"
     echo ""
     echo -e "  ${DIM}── Управление ────────────────────────────${NC}"
-    echo -e "  ${BLUE}5)${NC} Логи балансировщика (live)"
-    echo -e "  ${BLUE}6)${NC} Перезапустить балансировщик"
-    echo -e "  ${BLUE}7)${NC} Перезапустить Prometheus"
+    echo -e "  ${BLUE}6)${NC} Логи балансировщика (live)"
+    echo -e "  ${BLUE}7)${NC} Перезапустить балансировщик"
+    echo -e "  ${BLUE}8)${NC} Перезапустить Prometheus"
     echo ""
     echo -e "  ${DIM}0) Выйти${NC}"
     echo ""
@@ -289,8 +291,89 @@ handle() {
         pause; show_menu
         ;;
 
-    # ── 4. Статус нод ───────────────────────────────────────────
+    # ── 4. Исправить/удалить ноду ────────────────────────────────
     4)
+        echo -e "  ${BOLD}Список нод:${NC}"
+        echo ""
+        python3 - "$BALANCER_PY" << 'PYEOF'
+import re, sys
+BALANCER_PY = sys.argv[1]
+try:
+    content = open(BALANCER_PY).read()
+except FileNotFoundError:
+    print("  balancer.py не найден"); sys.exit(0)
+nodes = re.findall(r'"name"\s*:\s*"([^"]+)".*?"prom_instance"\s*:\s*"([^"]+)"', content, re.DOTALL)
+if not nodes:
+    print("  Ноды не найдены — список NODES пуст")
+    sys.exit(0)
+for i, (name, prom) in enumerate(nodes, 1):
+    print(f"    {i}) {name}  ({prom})")
+PYEOF
+        echo ""
+        read -rp "  Номер ноды для исправления (Enter = отмена): " NODE_NUM
+        if [ -z "$NODE_NUM" ]; then
+            show_menu; return
+        fi
+
+        NODE_IP=$(python3 - "$BALANCER_PY" "$NODE_NUM" << 'PYEOF'
+import re, sys
+BALANCER_PY, idx = sys.argv[1], int(sys.argv[2])
+content = open(BALANCER_PY).read()
+nodes = re.findall(r'"name"\s*:\s*"[^"]+".*?"prom_instance"\s*:\s*"([^":]+):', content, re.DOTALL)
+if 1 <= idx <= len(nodes):
+    print(nodes[idx - 1])
+PYEOF
+        )
+        if [ -z "$NODE_IP" ]; then
+            echo -e "  ${RED}[ERROR]${NC} Неверный номер"
+            pause; show_menu; return
+        fi
+
+        echo -e "  ${YELLOW}Нода с IP $NODE_IP будет удалена из всех конфигов${NC}"
+        read -rp "  Подтвердить? (yes/n): " CONFIRM
+        if [ "$CONFIRM" != "yes" ]; then
+            echo "  Отмена."
+            pause; show_menu; return
+        fi
+
+        python3 - "$BALANCER_PY" "$TARGETS_DIR" "$NODE_IP" << 'PYEOF'
+import re, sys, os
+BALANCER_PY, TARGETS_DIR, IP = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def remove_ip_from_yml(path, ip):
+    if not os.path.exists(path):
+        return
+    content = open(path).read()
+    if ip not in content:
+        return
+    blocks = re.split(r'(?=^- targets:)', content, flags=re.MULTILINE)
+    blocks = [b for b in blocks if ip not in b]
+    open(path, "w").write("".join(blocks))
+
+for fname in ("vpn_nodes.yml", "docker.yml", "ping.yml"):
+    remove_ip_from_yml(os.path.join(TARGETS_DIR, fname), IP)
+
+content = open(BALANCER_PY).read()
+new_content = re.sub(
+    r'\s*\{[^}]*"prom_instance":\s*"' + re.escape(IP) + r':[^}]*\},?',
+    "", content, flags=re.DOTALL,
+)
+open(BALANCER_PY, "w").write(new_content)
+PYEOF
+
+        systemctl restart prometheus 2>/dev/null || true
+        systemctl restart "$BALANCER_SVC" 2>/dev/null || true
+        echo -e "  ${GREEN}[OK]${NC} Нода удалена из конфигов"
+        echo ""
+        echo -e "  ${BLUE}[INFO]${NC} Введи данные заново:"
+        echo ""
+        [ ! -f "$ADD_NODE_PY" ] && curl -4 -Ls "$BASE_URL/add_node.py" -o "$ADD_NODE_PY"
+        python3 "$ADD_NODE_PY"
+        pause; show_menu
+        ;;
+
+    # ── 5. Статус нод ───────────────────────────────────────────
+    5)
         python3 - "$BALANCER_PY" << 'PYEOF'
 import re, sys
 
@@ -335,11 +418,11 @@ print()
 PYEOF
         echo ""
         read -rp "  r = обновить, Enter = в меню: " SUB
-        if [ "$SUB" = "r" ]; then handle 4; else show_menu; fi
+        if [ "$SUB" = "r" ]; then handle 5; else show_menu; fi
         ;;
 
-    # ── 5. Логи ─────────────────────────────────────────────────
-    5)
+    # ── 6. Логи ─────────────────────────────────────────────────
+    6)
         if [ ! -f "$BALANCER_LOG" ]; then
             echo -e "  ${YELLOW}[WARN]${NC} Лог-файл не найден"
             pause; show_menu; return
@@ -350,16 +433,16 @@ PYEOF
         show_menu
         ;;
 
-    # ── 6. Перезапустить балансировщик ──────────────────────────
-    6)
+    # ── 7. Перезапустить балансировщик ──────────────────────────
+    7)
         systemctl restart "$BALANCER_SVC" \
             && echo -e "  ${GREEN}[OK]${NC} Балансировщик перезапущен" \
             || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
         sleep 1; show_menu
         ;;
 
-    # ── 7. Перезапустить Prometheus ──────────────────────────────
-    7)
+    # ── 8. Перезапустить Prometheus ──────────────────────────────
+    8)
         systemctl restart prometheus \
             && echo -e "  ${GREEN}[OK]${NC} Prometheus перезапущен" \
             || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
