@@ -193,16 +193,53 @@ handle() {
 
     # ── 1. Установить / обновить ────────────────────────────────
     1)
-        echo -e "  ${BLUE}[INFO]${NC} Обновляем скрипты..."
+        echo -e "  ${BLUE}[INFO]${NC} Обновляем вспомогательные скрипты..."
         curl -4 -Ls "$BASE_URL/balancer.sh" -o /usr/local/bin/balancer && chmod +x /usr/local/bin/balancer \
             && echo -e "  ${GREEN}[OK]${NC} balancer обновлён" || echo -e "  ${YELLOW}[WARN]${NC} не удалось обновить balancer"
         curl -4 -Ls "$BASE_URL/add_node.py" -o "$ADD_NODE_PY" \
             && echo -e "  ${GREEN}[OK]${NC} add_node.py обновлён"
+
         if [ ! -f "$BALANCER_PY" ]; then
             echo ""
             echo -e "  ${YELLOW}balancer.py не найден — запусти полную установку:${NC}"
             echo -e "  bash <(curl -4 -Ls \"$BASE_URL/setup.sh\")"
+            pause; show_menu; return
         fi
+
+        echo ""
+        echo -e "  ${BLUE}[INFO]${NC} Обновляем логику balancer.py (токены и ноды сохраняются)..."
+
+        TEMPLATE=$(curl -4 -Ls "$BASE_URL/balancer_template.py") || {
+            echo -e "  ${RED}[ERROR]${NC} Не удалось скачать template"
+            pause; show_menu; return
+        }
+
+        # Разделитель: конфиг (токены/ноды) — выше, логика (функции) — ниже
+        SPLIT="Path(LOG_FILE).parent.mkdir"
+
+        # Конфиг-часть из текущего файла (до маркера, не включая его)
+        CONFIG=$(sed -n "1,/$SPLIT/p" "$BALANCER_PY" | head -n -1)
+
+        # Логика из нового template (от маркера до конца)
+        LOGIC=$(echo "$TEMPLATE" | sed -n "/$SPLIT/,\$p")
+
+        if [ -z "$CONFIG" ] || [ -z "$LOGIC" ]; then
+            echo -e "  ${RED}[ERROR]${NC} Не нашёл маркер разделения в файле — обновление отменено"
+            pause; show_menu; return
+        fi
+
+        # Бэкап перед заменой
+        BAK="${BALANCER_PY}.bak.$(date +%F-%H%M%S)"
+        cp "$BALANCER_PY" "$BAK"
+        echo -e "  ${DIM}Бэкап: $BAK${NC}"
+
+        # Записываем: старый конфиг + новая логика
+        { echo "$CONFIG"; echo ""; echo "$LOGIC"; } > "$BALANCER_PY"
+
+        systemctl restart "$BALANCER_SVC" \
+            && echo -e "  ${GREEN}[OK]${NC} balancer.py обновлён и перезапущен" \
+            || echo -e "  ${RED}[ERROR]${NC} Обновлён, но перезапуск не удался"
+
         pause; show_menu
         ;;
 
