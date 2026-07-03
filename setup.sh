@@ -177,6 +177,67 @@ PYEOF
         [ ! -f "/etc/prometheus/targets/$f" ] && echo "" > "/etc/prometheus/targets/$f"
     done
 
+    # ── Prometheus + node_exporter + blackbox-exporter ─────────────
+    info "Устанавливаем Prometheus + node_exporter..."
+    apt-get update -q
+    apt-get install -y prometheus prometheus-node-exporter
+    systemctl enable --now prometheus-node-exporter
+
+    info "Поднимаем blackbox-exporter (Docker, для ICMP-пинга нод)..."
+    if ! command -v docker &>/dev/null; then
+        curl -fsSL https://get.docker.com | sh
+        systemctl enable docker && systemctl start docker
+    fi
+    docker rm -f blackbox-exporter 2>/dev/null || true
+    docker run -d --name blackbox-exporter --restart=always \
+        -p 127.0.0.1:9115:9115 prom/blackbox-exporter
+
+    info "Пишем /etc/prometheus/prometheus.yml..."
+    cat > /etc/prometheus/prometheus.yml << 'PROM_EOF'
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "vpn_ping"
+    metrics_path: /probe
+    params:
+      module:
+        - icmp
+    file_sd_configs:
+      - files:
+          - "/etc/prometheus/targets/ping.yml"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__address__]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  - job_name: "vpn_nodes"
+    file_sd_configs:
+      - files:
+          - "/etc/prometheus/targets/vpn_nodes.yml"
+          - "/etc/prometheus/targets/docker.yml"
+
+  - job_name: 'prometheus'
+    scrape_interval: 5s
+    scrape_timeout: 5s
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: node
+    static_configs:
+      - targets: ['localhost:9100']
+PROM_EOF
+
+    systemctl enable prometheus
+    systemctl restart prometheus
+    systemctl is-active --quiet prometheus \
+        && success "Prometheus запущен" \
+        || warn "Prometheus не запустился — проверь journalctl -u prometheus"
+
     info "Создаём systemd сервис..."
     cat > "/etc/systemd/system/$SVC_NAME.service" << EOF
 [Unit]
