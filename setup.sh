@@ -76,15 +76,20 @@ setup_panel() {
     TG_MET_CHAT="$TG_ERR_CHAT"
 
     ERR_TOP_DEFAULT="${TG_ERR_TOP:-233}"
-    read -rp "  Topic ID — Ошибки/критика  (Enter = $ERR_TOP_DEFAULT): " TG_ERR_TOP_INPUT
+    read -rp "  Topic ID — Ошибки/критика   (Enter = $ERR_TOP_DEFAULT): " TG_ERR_TOP_INPUT
     TG_ERR_TOP="${TG_ERR_TOP_INPUT:-$ERR_TOP_DEFAULT}"
 
+    WARN_TOP_DEFAULT="${TG_WARN_TOP:-4}"
+    read -rp "  Topic ID — Предупреждения   (Enter = $WARN_TOP_DEFAULT): " TG_WARN_TOP_INPUT
+    TG_WARN_TOP="${TG_WARN_TOP_INPUT:-$WARN_TOP_DEFAULT}"
+
     REP_TOP_DEFAULT="${TG_REP_TOP:-6}"
-    read -rp "  Topic ID — Отчёты          (Enter = $REP_TOP_DEFAULT): " TG_REP_TOP_INPUT
+    read -rp "  Topic ID — Отчёты           (Enter = $REP_TOP_DEFAULT): " TG_REP_TOP_INPUT
     TG_REP_TOP="${TG_REP_TOP_INPUT:-$REP_TOP_DEFAULT}"
 
     read -rp "  Topic ID — Метрики (Enter = $TG_ERR_TOP, тот же топик, что Ошибки): " TG_MET_TOP
     TG_MET_TOP="${TG_MET_TOP:-$TG_ERR_TOP}"
+    TG_WARN_CHAT="$TG_ERR_CHAT"
 
     # ── Remnawave API токен ────────────────────────────────────
     echo ""
@@ -133,7 +138,7 @@ setup_panel() {
     info "Сервис:        $SVC_NAME  |  Тег: $BALANCER_TAG"
     info "Домен:         $DOMAIN"
     info "TG Chat:       $TG_ERR_CHAT"
-    info "  Метрики topic: $TG_MET_TOP  |  Ошибки topic: $TG_ERR_TOP  |  Отчёты topic: $TG_REP_TOP"
+    info "  Метрики: $TG_MET_TOP  |  Ошибки: $TG_ERR_TOP  |  Предупреждения: $TG_WARN_TOP  |  Отчёты: $TG_REP_TOP"
     echo "  ───────────────────────────────────────────────────────"
     echo ""
     read -rp "  Всё верно? (y = установить, n = ввести заново, q = выйти): " CONFIRM
@@ -171,6 +176,7 @@ setup_panel() {
     P_DOMAIN="$DOMAIN" P_RW_TOKEN="$RW_TOKEN" P_RW_COOKIE="$RW_COOKIE" P_TG_TOKEN="$TG_TOKEN" \
     P_TG_METRICS_CHAT="$TG_MET_CHAT" P_TG_METRICS_TOPIC="$TG_MET_TOP" \
     P_TG_ERRORS_CHAT="$TG_ERR_CHAT" P_TG_ERRORS_TOPIC="$TG_ERR_TOP" \
+    P_TG_WARNING_CHAT="$TG_WARN_CHAT" P_TG_WARNING_TOPIC="$TG_WARN_TOP" \
     P_TG_REP_CHAT="$TG_REP_CHAT"    P_TG_REP_TOPIC="$TG_REP_TOP" \
     python3 << 'PYEOF'
 import os
@@ -188,6 +194,8 @@ for ph, env in [
     ("%%TG_METRICS_TOPIC%%", "P_TG_METRICS_TOPIC"),
     ("%%TG_ERRORS_CHAT%%",   "P_TG_ERRORS_CHAT"),
     ("%%TG_ERRORS_TOPIC%%",  "P_TG_ERRORS_TOPIC"),
+    ("%%TG_WARNING_CHAT%%",  "P_TG_WARNING_CHAT"),
+    ("%%TG_WARNING_TOPIC%%", "P_TG_WARNING_TOPIC"),
     ("%%TG_REP_CHAT%%",      "P_TG_REP_CHAT"),
     ("%%TG_REP_TOPIC%%",     "P_TG_REP_TOPIC"),
 ]:

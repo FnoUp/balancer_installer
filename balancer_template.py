@@ -12,6 +12,8 @@ TG_METRICS_CHAT_ID  = "%%TG_METRICS_CHAT%%"
 TG_METRICS_TOPIC_ID = %%TG_METRICS_TOPIC%%
 TG_ERRORS_CHAT_ID   = "%%TG_ERRORS_CHAT%%"
 TG_ERRORS_TOPIC_ID  = %%TG_ERRORS_TOPIC%%
+TG_WARNING_CHAT_ID  = "%%TG_WARNING_CHAT%%"
+TG_WARNING_TOPIC_ID = %%TG_WARNING_TOPIC%%
 TG_REPORTS_CHAT_ID  = "%%TG_REP_CHAT%%"
 TG_REPORTS_TOPIC_ID = %%TG_REP_TOPIC%%
 
@@ -106,6 +108,7 @@ _HDR = f"⚙️ <b>{BALANCER_NAME}</b>\n"
 
 def tg_metrics(text):  tg_send(TG_METRICS_CHAT_ID, TG_METRICS_TOPIC_ID, _HDR + text)
 def tg_critical(text): tg_send(TG_ERRORS_CHAT_ID,  TG_ERRORS_TOPIC_ID,  _HDR + text)
+def tg_warning(text):  tg_send(TG_WARNING_CHAT_ID, TG_WARNING_TOPIC_ID, _HDR + text)
 def tg_report(text):   tg_send(TG_REPORTS_CHAT_ID,  TG_REPORTS_TOPIC_ID, _HDR + text)
 
 def node_can_alert(uuid, key, cooldown=ALERT_COOLDOWN):
@@ -132,7 +135,7 @@ def prom_query(q):
         now = time.time()
         if now - last_prom_alert > ALERT_COOLDOWN:
             last_prom_alert = now
-            tg_metrics(f"❌ <b>Prometheus недоступен</b>\nМетрики не читаются\n<code>{e}</code>")
+            tg_warning(f"❌ <b>Prometheus недоступен</b>\nМетрики не читаются\n<code>{e}</code>")
         return None
 
 # ── Remnawave API ──────────────────────────────────────────────
@@ -198,7 +201,7 @@ def set_host_tag(host_uuid, tag):
         now = time.time()
         if now - last_api_alert > ALERT_COOLDOWN:
             last_api_alert = now
-            tg_metrics(f"❌ <b>Ошибка API Remnawave</b>\nНе удалось обновить тег хоста\n<code>{e}</code>")
+            tg_warning(f"❌ <b>Ошибка API Remnawave</b>\nНе удалось обновить тег хоста\n<code>{e}</code>")
         return False
 
 def get_active_users(host_uuid):
@@ -479,7 +482,7 @@ def check_node(node, nodes_in_pool):
             )
             same_pool = [n["host_uuid"] for n in NODES if n.get("pool_tag", BALANCER_TAG) == node_tag]
             if not any(node_state.get(u, False) for u in same_pool):
-                tg_critical(
+                tg_warning(
                     f"🚨 <b>СЕРВИС НЕДОСТУПЕН — все ноды упали</b>\n"
                     f"Пул: <code>{node_tag}</code>  подключения невозможны.\n"
                     f"Последней выведена: <b>{name}</b>  score=<code>{score}</code>\n"
