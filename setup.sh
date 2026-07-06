@@ -91,18 +91,41 @@ setup_panel() {
     echo -e "  ${YELLOW}Создай API токен: панель → Settings → API Tokens${NC}"
     read -rp "  Remnawave API Token: " RW_TOKEN
 
-    # ── Cookie из nginx ────────────────────────────────────────
-    RW_COOKIE=""
-    NGINX_CONF=$(find /opt/remnawave -name "*.conf" 2>/dev/null | head -1)
-    if [ -n "$NGINX_CONF" ]; then
-        COOKIE_VAL=$(grep -o 'tufLczDD=[A-Za-z0-9_.+/=-]*' "$NGINX_CONF" 2>/dev/null | head -1 | cut -d= -f2-)
-        [ -n "$COOKIE_VAL" ] && RW_COOKIE="tufLczDD=$COOKIE_VAL" && success "Cookie найдена автоматически"
-    fi
-    if [ -z "$RW_COOKIE" ]; then
-        read -rp "  Cookie (tufLczDD=..., Enter если не нужна): " RW_COOKIE
-        # Снимаем случайные кавычки если пользователь скопировал с ними
-        RW_COOKIE=$(echo "$RW_COOKIE" | tr -d '"' | tr -d "'")
-    fi
+    # ── Cookie (нужна, если панель спрятана за секретной cookie) ──
+    # Имя cookie у каждой установки своё и случайное — угадать его
+    # нельзя, поэтому вместо автодетекта сразу проверяем подключение
+    # к API и, если не работает, ведём тебя за реальным значением.
+    echo ""
+    read -rp "  Cookie панели, если есть (Enter — проверим без неё): " RW_COOKIE
+    RW_COOKIE=$(echo "$RW_COOKIE" | tr -d '"' | tr -d "'")
+
+    echo ""
+    info "Проверяем подключение к Remnawave API..."
+    while true; do
+        API_TEST_CODE=$(curl -4 -s -o /dev/null -w '%{http_code}' --max-time 10 \
+            -H "Authorization: Bearer $RW_TOKEN" \
+            -H "Cookie: $RW_COOKIE" \
+            "https://$DOMAIN/api/hosts" 2>/dev/null)
+        if [ "$API_TEST_CODE" = "200" ]; then
+            success "API отвечает (HTTP 200) — балансировщик сможет управлять тегами нод"
+            break
+        fi
+        warn "API не отвечает корректно (код: ${API_TEST_CODE:-нет ответа})"
+        echo ""
+        echo -e "  ${YELLOW}Похоже, панель защищена секретной cookie, либо токен неверный.${NC}"
+        echo -e "  Как достать cookie из браузера:"
+        echo -e "    1. Открой панель в браузере и залогинься"
+        echo -e "    2. Нажми F12 → вкладка Network"
+        echo -e "    3. Обнови страницу (F5), кликни на любой запрос"
+        echo -e "    4. Headers → Request Headers → строка Cookie: — скопируй всё после неё"
+        echo ""
+        read -rp "  Вставь Cookie (Enter = пропустить проверку и продолжить как есть): " RW_COOKIE_RETRY
+        if [ -z "$RW_COOKIE_RETRY" ]; then
+            warn "Продолжаем без подтверждённого API — управление тегами нод может не работать!"
+            break
+        fi
+        RW_COOKIE=$(echo "$RW_COOKIE_RETRY" | tr -d '"' | tr -d "'")
+    done
 
     # ── Подтверждение ──────────────────────────────────────────
     echo ""
