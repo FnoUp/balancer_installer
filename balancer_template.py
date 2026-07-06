@@ -187,7 +187,7 @@ def set_host_tag(host_uuid, tag):
                 "Cookie":        REMNAWAVE_COOKIE,
                 "Content-Type":  "application/json",
             },
-            json={"uuid": host_uuid, "tag": tag},
+            json={"uuid": host_uuid, "tags": [tag] if tag else []},
             timeout=15,
         )
         if r.status_code != 200:
@@ -507,7 +507,7 @@ def sync_state():
             host = next((h for h in hosts if h["uuid"] == node["host_uuid"]), None)
             if host:
                 node_tag = node.get("pool_tag", BALANCER_TAG)
-                in_pool = host.get("tag") == node_tag
+                in_pool = node_tag in (host.get("tags") or [])
                 node_state[node["host_uuid"]] = in_pool
                 log.info(f"{node['name']}: {'в пуле' if in_pool else 'вне пула'}")
             else:
