@@ -83,8 +83,8 @@ setup_panel() {
     read -rp "  Topic ID — Отчёты          (Enter = $REP_TOP_DEFAULT): " TG_REP_TOP_INPUT
     TG_REP_TOP="${TG_REP_TOP_INPUT:-$REP_TOP_DEFAULT}"
 
-    read -rp "  Topic ID — Метрики (Enter = 0, без топика): " TG_MET_TOP
-    TG_MET_TOP="${TG_MET_TOP:-0}"
+    read -rp "  Topic ID — Метрики (Enter = $TG_ERR_TOP, тот же топик, что Ошибки): " TG_MET_TOP
+    TG_MET_TOP="${TG_MET_TOP:-$TG_ERR_TOP}"
 
     # ── Remnawave API токен ────────────────────────────────────
     echo ""
