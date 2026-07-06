@@ -466,12 +466,13 @@ def check_node(node, nodes_in_pool):
     if score > SCORE_BAD and in_pool:
         if len(nodes_in_pool) <= 1:
             log.warning(f"{name}: перегружена, но единственная — оставляем")
-            tg_critical(
-                f"⚠️ <b>Деградация — последняя нода перегружена</b>\n"
-                f"Нода: <b>{name}</b>  score=<code>{score}</code>\n"
-                f"Пользователи ещё подключены, но качество снижено.\n"
-                f"<code>{detail}</code>"
-            )
+            if node_can_alert(uuid, "degraded_last"):
+                tg_critical(
+                    f"⚠️ <b>Деградация — последняя нода перегружена</b>\n"
+                    f"Нода: <b>{name}</b>  score=<code>{score}</code>\n"
+                    f"Пользователи ещё подключены, но качество снижено.\n"
+                    f"<code>{detail}</code>"
+                )
             return
         if set_host_tag(uuid, ""):
             node_state[uuid] = False
@@ -482,12 +483,13 @@ def check_node(node, nodes_in_pool):
             )
             same_pool = [n["host_uuid"] for n in NODES if n.get("pool_tag", BALANCER_TAG) == node_tag]
             if not any(node_state.get(u, False) for u in same_pool):
-                tg_warning(
-                    f"🚨 <b>СЕРВИС НЕДОСТУПЕН — все ноды упали</b>\n"
-                    f"Пул: <code>{node_tag}</code>  подключения невозможны.\n"
-                    f"Последней выведена: <b>{name}</b>  score=<code>{score}</code>\n"
-                    f"<code>{detail}</code>"
-                )
+                if node_can_alert(node_tag, "pool_down"):
+                    tg_warning(
+                        f"🚨 <b>СЕРВИС НЕДОСТУПЕН — все ноды упали</b>\n"
+                        f"Пул: <code>{node_tag}</code>  подключения невозможны.\n"
+                        f"Последней выведена: <b>{name}</b>  score=<code>{score}</code>\n"
+                        f"<code>{detail}</code>"
+                    )
 
     elif score < SCORE_GOOD and not in_pool:
         if set_host_tag(uuid, node_tag):
@@ -497,6 +499,10 @@ def check_node(node, nodes_in_pool):
                 f"🟢 <b>Нода возвращена в пул</b>\nНода: <b>{name}</b>\n"
                 f"Score: <code>{score}</code> (порог {SCORE_GOOD})\n<code>{detail}</code>"
             )
+            node_reset_alert(node_tag, "pool_down")
+
+    if score <= SCORE_BAD:
+        node_reset_alert(uuid, "degraded_last")
 
 # ── Синхронизация состояния ─────────────────────────────────────
 
