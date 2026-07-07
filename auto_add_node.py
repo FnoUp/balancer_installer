@@ -46,9 +46,17 @@ COUNTRY_FLAGS = {
 }
 
 BRIDGE_SS_PORT = 9999
-INBOUND_TAG    = "vless-in"
-SS_INBOUND_TAG = "ss-in"
-SS_BRIDGE_TAG  = "ss-bridge"
+
+
+def sanitize_name(s, fallback="node"):
+    """config-profile и subscription-template имена принимают только
+    [A-Za-z0-9_\\s-], min_length=2 (проверено по исходникам remnawave/python-sdk) —
+    remark хоста (флаг+страна) под это не подходит, чистим отдельно."""
+    cleaned = re.sub(r'[^A-Za-z0-9_\s-]', '', s).strip()
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    if len(cleaned) < 2:
+        cleaned = fallback
+    return cleaned[:30]
 
 _created = {}
 
@@ -90,7 +98,12 @@ def preflight_ssh(address):
 
 
 # ── Remnawave API ────────────────────────────────────────────────
+_rw_creds_cache = None
+
 def rw_creds():
+    global _rw_creds_cache
+    if _rw_creds_cache is not None:
+        return _rw_creds_cache
     with open(BALANCER_FILE) as f:
         content = f.read()
     api  = re.search(r'REMNAWAVE_API\s*=\s*"([^"]+)"', content)
@@ -98,7 +111,8 @@ def rw_creds():
     cook = re.search(r'REMNAWAVE_COOKIE\s*=\s*"([^"]+)"', content)
     if not api or not tok:
         error("Не удалось прочитать REMNAWAVE_API/REMNAWAVE_TOKEN из balancer.py")
-    return api.group(1), tok.group(1), (cook.group(1) if cook else "")
+    _rw_creds_cache = (api.group(1), tok.group(1), (cook.group(1) if cook else ""))
+    return _rw_creds_cache
 
 
 def rw_request(method, path, body=None):
@@ -147,11 +161,17 @@ def discover_nodes():
         print(f"    {i}) {flag} {n.get('name')}  ({n.get('address')})  — {conn}{dup}")
     print()
 
+    if not nodes:
+        error("В Remnawave вообще нет ни одной ноды (GET /nodes пуст)")
+
     choice = ask("Номер ноды")
     try:
-        node = nodes[int(choice) - 1]
-    except (ValueError, IndexError, TypeError):
+        idx = int(choice)
+        if not (1 <= idx <= len(nodes)):
+            raise ValueError
+    except (ValueError, TypeError):
         error("Неверный номер ноды")
+    node = nodes[idx - 1]
 
     if not node.get("isConnected"):
         warn(f"Нода {node.get('address')} сейчас НЕ подключена к Remnawave.")
@@ -236,15 +256,17 @@ def resolve_remark(node):
 
 # ── Reality-ключи ─────────────────────────────────────────────────
 def generate_reality_keys(address):
+    """Реальный формат вывода 'xray x25519' — 'Password (PublicKey): ...',
+    не просто 'PublicKey:' — проверено вживую на реальной ноде."""
     info("Генерируем Reality-ключи на ноде...")
     ok, out, err = ssh_run(address, "docker run --rm teddysun/xray xray x25519", timeout=60)
     if not ok:
         error(f"Не удалось сгенерировать ключи на {address}: {err.strip()}")
-    priv = re.search(r'Private[ _]?[Kk]ey:\s*(\S+)', out)
-    pub  = re.search(r'(?:Public[ _]?[Kk]ey|Password):\s*(\S+)', out)
-    if not priv or not pub:
-        error(f"Не удалось распарсить вывод 'xray x25519':\n{out}")
-    return priv.group(1), pub.group(1)
+    priv = re.search(r'Private[ _]?[Kk]ey[^:]*:\s*(\S+)', out)
+    pub  = re.search(r'(?:Public[ _]?[Kk]ey|Password)[^:]*:\s*(\S+)', out)
+    if not priv:
+        error(f"Не удалось распарсить приватный ключ из вывода 'xray x25519':\n{out}")
+    return priv.group(1), (pub.group(1) if pub else None)
 
 
 # ── Сборка config-profile JSON (по образцу Templates/Node_*.txt) ──
@@ -269,9 +291,22 @@ def _base_routing_rules(inbound_tags_to_outbound):
     return rules
 
 
-def _vless_inbound(private_key, domain):
+def make_tags(remark):
+    """Remnawave требует глобально уникальные inbound-теги по всей панели
+    (проверено вживую: POST /config-profiles -> 409 A113 при повторе тега) —
+    нельзя использовать один и тот же тег для каждой новой ноды."""
+    base = re.sub(r'[^A-Za-z0-9]', '', remark) or "node"
+    base = base[:20]
     return {
-        "tag": INBOUND_TAG,
+        "inbound": f"{base}-vless",
+        "ss_inbound": f"{base}-ssin",
+        "ss_bridge": f"{base}-ssbridge",
+    }
+
+
+def _vless_inbound(private_key, domain, inbound_tag):
+    return {
+        "tag": inbound_tag,
         "port": 443,
         "protocol": "vless",
         "settings": {"clients": [], "decryption": "none"},
@@ -305,18 +340,20 @@ def _base_outbounds(domain_strategy):
     ]
 
 
-def build_config_profile(node_type, domain, private_key, *, ss_password=None,
+def build_config_profile(node_type, domain, private_key, tags, *, ss_password=None,
                           dest_ip=None, dest_password=None):
-    inbounds = [_vless_inbound(private_key, domain)]
+    inbound_tag = tags["inbound"]
+    inbounds = [_vless_inbound(private_key, domain, inbound_tag)]
 
     if node_type == "simple":
         outbounds = _base_outbounds("UseIP")
-        routing = _base_routing_rules({INBOUND_TAG: "warp-out"})
+        routing = _base_routing_rules({inbound_tag: "warp-out"})
 
     elif node_type == "bridge_out":
+        ss_inbound_tag = tags["ss_inbound"]
         outbounds = _base_outbounds("UseIPv4")
         inbounds.append({
-            "tag": SS_INBOUND_TAG,
+            "tag": ss_inbound_tag,
             "port": BRIDGE_SS_PORT,
             "listen": "0.0.0.0",
             "protocol": "shadowsocks",
@@ -327,12 +364,13 @@ def build_config_profile(node_type, domain, private_key, *, ss_password=None,
                 "password": ss_password,
             },
         })
-        routing = _base_routing_rules({INBOUND_TAG: "warp-out", SS_INBOUND_TAG: "warp-out"})
+        routing = _base_routing_rules({inbound_tag: "warp-out", ss_inbound_tag: "warp-out"})
 
     elif node_type == "bridge_in":
+        ss_bridge_tag = tags["ss_bridge"]
         outbounds = _base_outbounds("UseIPv4")
         outbounds.append({
-            "tag": SS_BRIDGE_TAG,
+            "tag": ss_bridge_tag,
             "protocol": "shadowsocks",
             "settings": {"servers": [{
                 "port": BRIDGE_SS_PORT,
@@ -342,7 +380,7 @@ def build_config_profile(node_type, domain, private_key, *, ss_password=None,
             }]},
             "streamSettings": {"sockopt": {"interface": "warp", "tcpFastOpen": True}},
         })
-        routing = _base_routing_rules({INBOUND_TAG: SS_BRIDGE_TAG})
+        routing = _base_routing_rules({inbound_tag: ss_bridge_tag})
 
     else:
         error(f"Неизвестный тип ноды: {node_type}")
@@ -379,27 +417,29 @@ def find_inbound_uuid(profile, tag):
 
 
 def create_config_profile(name, config_json):
-    status, data = rw_request("POST", "/config-profiles", {"name": name})
+    """POST /config-profiles требует name+config за один вызов (CreateConfigProfileRequestDto
+    в remnawave/python-sdk) — отдельного PATCH-довеска не нужно."""
+    safe_name = sanitize_name(name)
+    status, data = rw_request("POST", "/config-profiles", {"name": safe_name, "config": config_json})
     if status not in (200, 201):
         fail(f"POST /config-profiles -> HTTP {status}: {data}")
     profile = data.get("response", data)
-    profile_uuid = profile["uuid"]
-    _created["config-profile"] = profile_uuid
-    success(f"Config-profile создан: {profile_uuid}")
-
-    status, data = rw_request("PATCH", "/config-profiles", {"uuid": profile_uuid, "config": config_json})
-    if status != 200:
-        fail(f"PATCH /config-profiles -> HTTP {status}: {data}")
-    profile = data.get("response", data)
-    success("Конфиг применён к профилю")
+    if "uuid" not in profile:
+        fail(f"POST /config-profiles вернул неожиданный формат ответа: {profile}")
+    _created["config-profile"] = profile["uuid"]
+    success(f"Config-profile создан: {profile['uuid']}")
     return profile
 
 
 def bind_profile_to_node(node_uuid, profile_uuid, inbound_uuids):
+    # Схема подтверждена по исходникам remnawave/python-sdk (UpdateNodeRequestDto ->
+    # NodeConfigProfileRequestDto) и живым GET /nodes: вложенный объект "configProfile".
     payload = {
         "uuid": node_uuid,
-        "activeConfigProfileUuid": profile_uuid,
-        "activeInbounds": inbound_uuids,
+        "configProfile": {
+            "activeConfigProfileUuid": profile_uuid,
+            "activeInbounds": inbound_uuids,
+        },
     }
     print()
     warn("Единственный ранее не проверенный вживую вызов — PATCH /nodes:")
@@ -415,7 +455,8 @@ def bind_profile_to_node(node_uuid, profile_uuid, inbound_uuids):
 
     nodes = rw_get("/nodes")
     node = next((n for n in nodes if n.get("uuid") == node_uuid), None)
-    if not node or node.get("activeConfigProfileUuid") != profile_uuid:
+    bound_uuid = (node or {}).get("configProfile", {}).get("activeConfigProfileUuid")
+    if not node or bound_uuid != profile_uuid:
         fail(
             "PATCH /nodes вернул 200, но повторный GET /nodes не подтверждает применение.\n"
             "Состояние ноды могло измениться частично — НЕ повторяй PATCH не разобравшись.\n"
@@ -437,25 +478,31 @@ def get_virtual_host_reference():
 
 
 def create_real_host(node, profile_uuid, inbound_uuid, remark):
+    # inbound вложен в отдельный объект (CreateHostInboundData в remnawave/python-sdk),
+    # плоские configProfileUuid/configProfileInboundUuid на верхнем уровне не принимаются.
     payload = {
-        "remark": remark,
+        "remark": remark[:40],
         "address": node["address"],
         "port": 443,
-        "configProfileUuid": profile_uuid,
-        "configProfileInboundUuid": inbound_uuid,
+        "inbound": {
+            "configProfileUuid": profile_uuid,
+            "configProfileInboundUuid": inbound_uuid,
+        },
         "fingerprint": "firefox",
     }
     status, data = rw_request("POST", "/hosts", payload)
     if status not in (200, 201):
         fail(f"POST /hosts -> HTTP {status}: {data}")
     host = data.get("response", data)
+    if "uuid" not in host:
+        fail(f"POST /hosts вернул неожиданный формат ответа: {host}")
     _created["real-host"] = host["uuid"]
     success(f"Реальный хост создан: {host['uuid']} ({remark})")
     return host
 
 
 def create_virtual_holder_host(remark_base, real_host_uuid):
-    remark = f"{remark_base} (device-route RU)"
+    remark = f"{remark_base} (device-route RU)"[:40]
     hosts = rw_get("/hosts")
     dup = next((h for h in hosts if h.get("remark") == remark), None)
     if dup:
@@ -464,18 +511,30 @@ def create_virtual_holder_host(remark_base, real_host_uuid):
             return dup
 
     ref = get_virtual_host_reference()
+    ref_inbound = ref.get("inbound") or {}
+    ref_profile_uuid = ref_inbound.get("configProfileUuid")
+    ref_inbound_uuid = ref_inbound.get("configProfileInboundUuid")
+    if not ref.get("address") or not ref.get("port") or not ref_profile_uuid or not ref_inbound_uuid:
+        fail(
+            f"Референсный виртуальный хост {REFERENCE_VIRTUAL_HOST_UUID} неполный "
+            f"(address/port/inbound) — проверь его вручную в Remnawave: {ref}"
+        )
     payload = {
         "remark": remark,
         "address": ref["address"],
         "port": ref["port"],
-        "configProfileUuid": ref["configProfileUuid"],
-        "configProfileInboundUuid": ref["configProfileInboundUuid"],
-        "fingerprint": ref.get("fingerprint", "firefox"),
+        "inbound": {
+            "configProfileUuid": ref_profile_uuid,
+            "configProfileInboundUuid": ref_inbound_uuid,
+        },
+        "fingerprint": ref.get("fingerprint") or "firefox",
     }
     status, data = rw_request("POST", "/hosts", payload)
     if status not in (200, 201):
         fail(f"POST /hosts (виртуальный хост) -> HTTP {status}: {data}")
     host = data.get("response", data)
+    if "uuid" not in host:
+        fail(f"POST /hosts (виртуальный хост) вернул неожиданный формат ответа: {host}")
     _created["virtual-host"] = host["uuid"]
     success(f"Виртуальный хост-держатель создан: {host['uuid']} ({remark})")
     return host
@@ -541,10 +600,14 @@ def build_subscription_template(real_host_uuid):
 
 
 def create_subscription_template(name, template_json):
-    status, data = rw_request("POST", "/subscription-templates", {"name": name, "type": "XRAY_JSON"})
+    safe_name = sanitize_name(name)
+    status, data = rw_request("POST", "/subscription-templates",
+                               {"name": safe_name, "templateType": "XRAY_JSON"})
     if status not in (200, 201):
         fail(f"POST /subscription-templates -> HTTP {status}: {data}")
     tpl = data.get("response", data)
+    if "uuid" not in tpl:
+        fail(f"POST /subscription-templates вернул неожиданный формат ответа: {tpl}")
     tpl_uuid = tpl["uuid"]
     _created["subscription-template"] = tpl_uuid
 
@@ -611,15 +674,16 @@ def main():
     if ask("Продолжить и сгенерировать ключи на ноде? (y/n)", "y").lower() != "y":
         print("Отмена."); sys.exit(0)
 
-    priv_key, _pub_key = generate_reality_keys(address)
+    priv_key, pub_key = generate_reality_keys(address)
 
+    tags = make_tags(remark)
     config_json = build_config_profile(
-        node_type, address, priv_key,
+        node_type, address, priv_key, tags,
         ss_password=ss_password, dest_ip=dest_ip, dest_password=dest_password,
     )
 
     profile = create_config_profile(f"{remark} (auto)", config_json)
-    main_inbound_uuid = find_inbound_uuid(profile, INBOUND_TAG)
+    main_inbound_uuid = find_inbound_uuid(profile, tags["inbound"])
     all_inbound_uuids = [i["uuid"] for i in extract_inbounds(profile)]
 
     bind_profile_to_node(node["uuid"], profile["uuid"], all_inbound_uuids)
@@ -643,6 +707,8 @@ def main():
     info(f"Реальный хост:     {real_host['uuid']}")
     info(f"Виртуальный хост:  {virtual_host['uuid']}")
     info(f"Шаблон подписки:   {template_uuid}")
+    if pub_key:
+        info(f"Reality public key: {pub_key}")
     if node_type == "bridge_out":
         info(f"SS-пароль моста:   {ss_password}")
         info(f"SS-порт моста:     {BRIDGE_SS_PORT}")

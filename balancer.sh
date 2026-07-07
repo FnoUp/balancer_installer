@@ -334,8 +334,10 @@ handle() {
 
     # ── 4. Автодобавление ноды (полная автоматизация) ───────────
     4)
-        curl -4 -Ls "$BASE_URL/add_node.py" -o "$ADD_NODE_PY"
-        curl -4 -Ls "$BASE_URL/auto_add_node.py" -o "$AUTO_ADD_NODE_PY"
+        curl -4 -Ls "$BASE_URL/add_node.py" -o "$ADD_NODE_PY" && [ -s "$ADD_NODE_PY" ] \
+            || { echo -e "  ${RED}[ERROR]${NC} Не удалось скачать add_node.py"; pause; show_menu; return; }
+        curl -4 -Ls "$BASE_URL/auto_add_node.py" -o "$AUTO_ADD_NODE_PY" && [ -s "$AUTO_ADD_NODE_PY" ] \
+            || { echo -e "  ${RED}[ERROR]${NC} Не удалось скачать auto_add_node.py"; pause; show_menu; return; }
         echo ""
         python3 "$AUTO_ADD_NODE_PY"
         pause; show_menu
