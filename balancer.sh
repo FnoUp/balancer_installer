@@ -7,6 +7,7 @@
 
 BASE_URL="https://raw.githubusercontent.com/FnoUp/balancer_installer/master"
 ADD_NODE_PY="/tmp/add_node.py"
+AUTO_ADD_NODE_PY="/tmp/auto_add_node.py"
 TARGETS_DIR="/etc/prometheus/targets"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -38,6 +39,81 @@ BALANCER_SVC="${SVC_NAME:-vpn-balancer}"
 BALANCER_LOG="/var/log/${SVC_NAME:-vpn-balancer}/balancer.log"
 
 # ══════════════════════════════════════════════════════════════
+# ОБНОВЛЕНИЕ СКРИПТОВ (общее для панели и ноды)
+# ══════════════════════════════════════════════════════════════
+update_panel_scripts() {
+    echo -e "  ${BLUE}[INFO]${NC} Обновляем вспомогательные скрипты..."
+    curl -4 -Ls "$BASE_URL/balancer.sh" -o /usr/local/bin/balancer && chmod +x /usr/local/bin/balancer \
+        && echo -e "  ${GREEN}[OK]${NC} balancer обновлён" || echo -e "  ${YELLOW}[WARN]${NC} не удалось обновить balancer"
+    curl -4 -Ls "$BASE_URL/add_node.py" -o "$ADD_NODE_PY" \
+        && echo -e "  ${GREEN}[OK]${NC} add_node.py обновлён"
+    curl -4 -Ls "$BASE_URL/auto_add_node.py" -o "$AUTO_ADD_NODE_PY" \
+        && echo -e "  ${GREEN}[OK]${NC} auto_add_node.py обновлён"
+
+    if [ ! -f "$BALANCER_PY" ]; then
+        echo ""
+        echo -e "  ${YELLOW}balancer.py не найден — запусти полную установку:${NC}"
+        echo -e "  bash <(curl -4 -Ls \"$BASE_URL/setup.sh\")"
+        return
+    fi
+
+    echo ""
+    echo -e "  ${BLUE}[INFO]${NC} Обновляем логику balancer.py (токены и ноды сохраняются)..."
+
+    TEMPLATE=$(curl -4 -Ls "$BASE_URL/balancer_template.py") || {
+        echo -e "  ${RED}[ERROR]${NC} Не удалось скачать template"
+        return
+    }
+
+    # Разделитель: конфиг (токены/ноды) — выше, логика (функции) — ниже
+    SPLIT="Path(LOG_FILE).parent.mkdir"
+
+    # Конфиг-часть из текущего файла (до маркера, не включая его)
+    CONFIG=$(sed -n "1,/$SPLIT/p" "$BALANCER_PY" | head -n -1)
+
+    # Логика из нового template (от маркера до конца)
+    LOGIC=$(echo "$TEMPLATE" | sed -n "/$SPLIT/,\$p")
+
+    if [ -z "$CONFIG" ] || [ -z "$LOGIC" ]; then
+        echo -e "  ${RED}[ERROR]${NC} Не нашёл маркер разделения в файле — обновление отменено"
+        return
+    fi
+
+    # Бэкап перед заменой
+    BAK="${BALANCER_PY}.bak.$(date +%F-%H%M%S)"
+    cp "$BALANCER_PY" "$BAK"
+    echo -e "  ${DIM}Бэкап: $BAK${NC}"
+
+    # Записываем: старый конфиг + новая логика
+    { echo "$CONFIG"; echo ""; echo "$LOGIC"; } > "$BALANCER_PY"
+
+    systemctl restart "$BALANCER_SVC" \
+        && echo -e "  ${GREEN}[OK]${NC} balancer.py обновлён и перезапущен" \
+        || echo -e "  ${RED}[ERROR]${NC} Обновлён, но перезапуск не удался"
+}
+
+update_node_scripts() {
+    curl -4 -Ls "$BASE_URL/balancer.sh" -o /usr/local/bin/balancer && chmod +x /usr/local/bin/balancer \
+        && echo -e "  ${GREEN}[OK]${NC} balancer обновлён" \
+        || echo -e "  ${RED}[ERROR]${NC} Не удалось обновить"
+}
+
+update_script_menu() {
+    echo -e "  ${BOLD}Что обновить?${NC}"
+    echo ""
+    echo -e "  ${BLUE}1)${NC} Панель"
+    echo -e "  ${BLUE}2)${NC} Нода"
+    echo ""
+    read -rp "  Выбор: " ROLE_CHOICE
+    echo ""
+    case "$ROLE_CHOICE" in
+        1) update_panel_scripts ;;
+        2) update_node_scripts ;;
+        *) echo "  Отмена." ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════
 # МЕНЮ НОДЫ
 # ══════════════════════════════════════════════════════════════
 show_menu_node() {
@@ -65,6 +141,7 @@ show_menu_node() {
     echo -e "  ${BLUE}5)${NC} Обновить команду balancer"
     echo -e "  ${BLUE}6)${NC} Запустить speedtest вручную"
     echo -e "       ${DIM}(3 теста, обновляет файл ёмкости канала)${NC}"
+    echo -e "  ${BLUE}7)${NC} Обновить скрипт (панель/нода)"
     echo ""
     echo -e "  ${DIM}0) Выйти${NC}"
     echo ""
@@ -129,9 +206,7 @@ handle_node() {
         ;;
     # ── 5. Обновить balancer ────────────────────────────────────
     5)
-        curl -4 -Ls "$BASE_URL/balancer.sh" -o /usr/local/bin/balancer && chmod +x /usr/local/bin/balancer \
-            && echo -e "  ${GREEN}[OK]${NC} balancer обновлён" \
-            || echo -e "  ${RED}[ERROR]${NC} Не удалось обновить"
+        update_node_scripts
         pause; show_menu_node
         ;;
     # ── 6. Speedtest вручную ────────────────────────────────────
@@ -149,6 +224,11 @@ handle_node() {
         [ -n "$RESULT" ] \
             && echo -e "  ${GREEN}[OK]${NC} Результат: ${BOLD}${RESULT} Mbps${NC}" \
             || echo -e "  ${YELLOW}[WARN]${NC} Результат не записан — проверь логи /var/log/vpn-speedtest.log"
+        pause; show_menu_node
+        ;;
+    # ── 7. Обновить скрипт (панель/нода) ────────────────────────
+    7)
+        update_script_menu
         pause; show_menu_node
         ;;
     0) echo ""; exit 0 ;;
@@ -176,15 +256,19 @@ show_menu() {
     echo ""
     echo -e "  ${DIM}── Ноды ──────────────────────────────────${NC}"
     echo -e "  ${BLUE}3)${NC} Добавить новую ноду"
-    echo -e "  ${BLUE}4)${NC} Исправить/удалить ноду"
+    echo -e "  ${BLUE}4)${NC} Автодобавление ноды (полная автоматизация)"
+    echo -e "       ${DIM}(сама подтягивает уже подключённую ноду из Remnawave,${NC}"
+    echo -e "       ${DIM} сама определяет интерфейс/домен/IP, создаёт всё связанное)${NC}"
+    echo -e "  ${BLUE}5)${NC} Исправить/удалить ноду"
     echo -e "       ${DIM}(если ошибся при вводе — удалит и даст ввести заново)${NC}"
-    echo -e "  ${BLUE}5)${NC} Статус нод и score"
+    echo -e "  ${BLUE}6)${NC} Статус нод и score"
     echo ""
     echo -e "  ${DIM}── Управление ────────────────────────────${NC}"
-    echo -e "  ${BLUE}6)${NC} Логи балансировщика (live)"
-    echo -e "  ${BLUE}7)${NC} Перезапустить балансировщик"
-    echo -e "  ${BLUE}8)${NC} Перезапустить Prometheus"
-    echo -e "  ${BLUE}9)${NC} Перезапустить blackbox-exporter"
+    echo -e "  ${BLUE}7)${NC} Логи балансировщика (live)"
+    echo -e "  ${BLUE}8)${NC} Перезапустить балансировщик"
+    echo -e "  ${BLUE}9)${NC} Перезапустить Prometheus"
+    echo -e "  ${BLUE}10)${NC} Перезапустить blackbox-exporter"
+    echo -e "  ${BLUE}11)${NC} Обновить скрипт (панель/нода)"
     echo ""
     echo -e "  ${DIM}0) Выйти${NC}"
     echo ""
@@ -198,53 +282,7 @@ handle() {
 
     # ── 1. Установить / обновить ────────────────────────────────
     1)
-        echo -e "  ${BLUE}[INFO]${NC} Обновляем вспомогательные скрипты..."
-        curl -4 -Ls "$BASE_URL/balancer.sh" -o /usr/local/bin/balancer && chmod +x /usr/local/bin/balancer \
-            && echo -e "  ${GREEN}[OK]${NC} balancer обновлён" || echo -e "  ${YELLOW}[WARN]${NC} не удалось обновить balancer"
-        curl -4 -Ls "$BASE_URL/add_node.py" -o "$ADD_NODE_PY" \
-            && echo -e "  ${GREEN}[OK]${NC} add_node.py обновлён"
-
-        if [ ! -f "$BALANCER_PY" ]; then
-            echo ""
-            echo -e "  ${YELLOW}balancer.py не найден — запусти полную установку:${NC}"
-            echo -e "  bash <(curl -4 -Ls \"$BASE_URL/setup.sh\")"
-            pause; show_menu; return
-        fi
-
-        echo ""
-        echo -e "  ${BLUE}[INFO]${NC} Обновляем логику balancer.py (токены и ноды сохраняются)..."
-
-        TEMPLATE=$(curl -4 -Ls "$BASE_URL/balancer_template.py") || {
-            echo -e "  ${RED}[ERROR]${NC} Не удалось скачать template"
-            pause; show_menu; return
-        }
-
-        # Разделитель: конфиг (токены/ноды) — выше, логика (функции) — ниже
-        SPLIT="Path(LOG_FILE).parent.mkdir"
-
-        # Конфиг-часть из текущего файла (до маркера, не включая его)
-        CONFIG=$(sed -n "1,/$SPLIT/p" "$BALANCER_PY" | head -n -1)
-
-        # Логика из нового template (от маркера до конца)
-        LOGIC=$(echo "$TEMPLATE" | sed -n "/$SPLIT/,\$p")
-
-        if [ -z "$CONFIG" ] || [ -z "$LOGIC" ]; then
-            echo -e "  ${RED}[ERROR]${NC} Не нашёл маркер разделения в файле — обновление отменено"
-            pause; show_menu; return
-        fi
-
-        # Бэкап перед заменой
-        BAK="${BALANCER_PY}.bak.$(date +%F-%H%M%S)"
-        cp "$BALANCER_PY" "$BAK"
-        echo -e "  ${DIM}Бэкап: $BAK${NC}"
-
-        # Записываем: старый конфиг + новая логика
-        { echo "$CONFIG"; echo ""; echo "$LOGIC"; } > "$BALANCER_PY"
-
-        systemctl restart "$BALANCER_SVC" \
-            && echo -e "  ${GREEN}[OK]${NC} balancer.py обновлён и перезапущен" \
-            || echo -e "  ${RED}[ERROR]${NC} Обновлён, но перезапуск не удался"
-
+        update_panel_scripts
         pause; show_menu
         ;;
 
@@ -265,7 +303,7 @@ handle() {
         if [ "$CONFIRM" = "yes" ]; then
             systemctl stop "$BALANCER_SVC"    2>/dev/null || true
             systemctl disable "$BALANCER_SVC" 2>/dev/null || true
-            rm -rf "/opt/$BALANCER_SVC" "/var/log/$BALANCER_SVC" /tmp/add_node.py /etc/vpn-balancer
+            rm -rf "/opt/$BALANCER_SVC" "/var/log/$BALANCER_SVC" /tmp/add_node.py /tmp/auto_add_node.py /etc/vpn-balancer
             rm -f "/etc/systemd/system/$BALANCER_SVC.service" /usr/local/bin/balancer
             rm -f "$TARGETS_DIR"/vpn_nodes.yml "$TARGETS_DIR"/docker.yml "$TARGETS_DIR"/ping.yml
             systemctl daemon-reload
@@ -294,8 +332,17 @@ handle() {
         pause; show_menu
         ;;
 
-    # ── 4. Исправить/удалить ноду ────────────────────────────────
+    # ── 4. Автодобавление ноды (полная автоматизация) ───────────
     4)
+        curl -4 -Ls "$BASE_URL/add_node.py" -o "$ADD_NODE_PY"
+        curl -4 -Ls "$BASE_URL/auto_add_node.py" -o "$AUTO_ADD_NODE_PY"
+        echo ""
+        python3 "$AUTO_ADD_NODE_PY"
+        pause; show_menu
+        ;;
+
+    # ── 5. Исправить/удалить ноду ────────────────────────────────
+    5)
         echo -e "  ${BOLD}Список нод:${NC}"
         echo ""
         python3 - "$BALANCER_PY" << 'PYEOF'
@@ -550,8 +597,8 @@ PYEOF
         pause; show_menu
         ;;
 
-    # ── 5. Статус нод ───────────────────────────────────────────
-    5)
+    # ── 6. Статус нод ───────────────────────────────────────────
+    6)
         python3 - "$BALANCER_PY" << 'PYEOF'
 import re, sys
 
@@ -596,11 +643,11 @@ print()
 PYEOF
         echo ""
         read -rp "  r = обновить, Enter = в меню: " SUB
-        if [ "$SUB" = "r" ]; then handle 5; else show_menu; fi
+        if [ "$SUB" = "r" ]; then handle 6; else show_menu; fi
         ;;
 
-    # ── 6. Логи ─────────────────────────────────────────────────
-    6)
+    # ── 7. Логи ─────────────────────────────────────────────────
+    7)
         if [ ! -f "$BALANCER_LOG" ]; then
             echo -e "  ${YELLOW}[WARN]${NC} Лог-файл не найден"
             pause; show_menu; return
@@ -611,28 +658,34 @@ PYEOF
         show_menu
         ;;
 
-    # ── 7. Перезапустить балансировщик ──────────────────────────
-    7)
+    # ── 8. Перезапустить балансировщик ──────────────────────────
+    8)
         systemctl restart "$BALANCER_SVC" \
             && echo -e "  ${GREEN}[OK]${NC} Балансировщик перезапущен" \
             || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
         sleep 1; show_menu
         ;;
 
-    # ── 8. Перезапустить Prometheus ──────────────────────────────
-    8)
+    # ── 9. Перезапустить Prometheus ──────────────────────────────
+    9)
         systemctl restart prometheus \
             && echo -e "  ${GREEN}[OK]${NC} Prometheus перезапущен" \
             || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
         sleep 1; show_menu
         ;;
 
-    # ── 9. Перезапустить blackbox-exporter ────────────────────────
-    9)
+    # ── 10. Перезапустить blackbox-exporter ───────────────────────
+    10)
         docker restart blackbox-exporter 2>/dev/null \
             && echo -e "  ${GREEN}[OK]${NC} blackbox-exporter перезапущен" \
             || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить (контейнер не найден?)"
         sleep 1; show_menu
+        ;;
+
+    # ── 11. Обновить скрипт (панель/нода) ─────────────────────────
+    11)
+        update_script_menu
+        pause; show_menu
         ;;
 
     0) echo ""; exit 0 ;;
