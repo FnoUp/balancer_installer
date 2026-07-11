@@ -266,11 +266,11 @@ def resolve_remark(node):
 
 
 # ── hosts ──────────────────────────────────────────────────────
-def create_real_host(node, profile_uuid, inbound_uuid, remark):
+def create_real_host(node, profile_uuid, inbound_uuid, remark, pool_tag):
     # Видимый клиенту хост — обычная прямая точка входа на реальный
-    # инбаунд ноды. Тег (BALANCER_WIFI/MOBILE) на нём проставляет
-    # balancer.py по здоровью ноды, поэтому он же участвует и в
-    # tagRegex-инжекте из авто-хостов WiFi/Mobile.
+    # инбаунд ноды. Тег пула ставим сразу при создании (не ждём первый
+    # цикл проверки здоровья в balancer.py) — нода сразу попадает в пул;
+    # дальше balancer.py сам снимает/возвращает тег по здоровью, как обычно.
     hosts = rw_get("/hosts")
     dup = next((h for h in hosts if h.get("remark") == remark), None)
     if dup:
@@ -289,6 +289,7 @@ def create_real_host(node, profile_uuid, inbound_uuid, remark):
             "configProfileInboundUuid": inbound_uuid,
         },
         "fingerprint": "firefox",
+        "tags": [pool_tag],
     }
     status, data = rw_request("POST", "/hosts", payload)
     if status not in (200, 201):
@@ -589,7 +590,7 @@ def main():
     if ask("Создать хост и шаблон подписки? (y/n)", "y").lower() != "y":
         print("Отмена."); sys.exit(0)
 
-    real_host = create_real_host(node, profile_uuid, inbound_uuid, remark)
+    real_host = create_real_host(node, profile_uuid, inbound_uuid, remark, pool_tag)
     virtual_host = create_virtual_holder_host(remark, real_host["uuid"], node, profile_uuid, inbound_uuid)
     template_json = build_subscription_template(real_host["uuid"])
     template_uuid = create_subscription_template(f"{remark}_Direct", template_json)
