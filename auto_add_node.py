@@ -50,8 +50,8 @@ COUNTRY_FLAGS = {
 # к ним, а injectHosts по tagRegex подставляет любую живую ноду с этим
 # тегом (тег на реальном хосте ноды проставляет balancer.py по здоровью).
 AUTO_POOL_HOSTS = {
-    "BALANCER_WIFI":   ("Auto ДЛЯ ДОМАШНЕГО ИНТЕРНЕТА", "Balancer_Wifi"),
-    "BALANCER_MOBILE": ("Auto ДЛЯ МОБИЛЬНОГО ИНТЕРНЕТА BRIDGE", "Balancer_Mobile"),
+    "BALANCER_WIFI":   ("🏠 Auto ДЛЯ ДОМАШНЕГО ИНТЕРНЕТА", "Balancer_Wifi"),
+    "BALANCER_MOBILE": ("📱 Auto ДЛЯ МОБИЛЬНОГО ИНТЕРНЕТА", "Balancer_Mobile"),
 }
 
 
