@@ -270,6 +270,13 @@ def create_real_host(node, profile_uuid, inbound_uuid, remark):
     # Невидимый клиенту хост: он не выбирается напрямую в приложении, а
     # существует только как цель для tagRegex-инжекта из авто-хостов
     # WiFi/Mobile (тег на нём проставляет balancer.py по здоровью ноды).
+    hosts = rw_get("/hosts")
+    dup = next((h for h in hosts if h.get("remark") == remark), None)
+    if dup:
+        warn(f"Хост с remark '{remark}' уже существует ({dup['uuid']}) — вероятно, две ноды в одной стране.")
+        if ask("Всё равно создать ещё один с таким же именем? (y/n)", "n").lower() != "y":
+            error("Отмена — выбери другое имя хоста (remark) и запусти скрипт заново.")
+
     # inbound вложен в отдельный объект (CreateHostInboundData в remnawave/python-sdk),
     # плоские configProfileUuid/configProfileInboundUuid на верхнем уровне не принимаются.
     payload = {
@@ -445,15 +452,39 @@ def build_pool_subscription_template(pool_tag, balancer_name):
     }
 
 
+def find_subscription_template_by_name(name):
+    status, data = rw_request("GET", "/subscription-templates")
+    templates = (data.get("response", data) or {}).get("templates", [])
+    return next((t for t in templates if t.get("name") == name), None)
+
+
 def create_subscription_template(name, template_json):
+    """Remnawave иногда отвечает HTTP 500 на POST, хотя шаблон фактически
+    создаётся (проверено вживую) — поэтому: (1) сначала проверяем, нет ли
+    уже шаблона с таким именем (например, remark хоста совпал с уже
+    существующим — тогда это настоящая проблема, а не ложный 500), и
+    (2) если POST вернул ошибку, перепроверяем по имени перед тем как
+    сдаться — вдруг он всё же создался."""
     safe_name = sanitize_name(name)
+    dup = find_subscription_template_by_name(safe_name)
+    if dup:
+        fail(
+            f"Шаблон подписки с именем '{safe_name}' уже существует ({dup['uuid']}) — "
+            f"скорее всего, имя хоста совпадает с уже существующим. Выбери другое имя хоста."
+        )
+
     status, data = rw_request("POST", "/subscription-templates",
                                {"name": safe_name, "templateType": "XRAY_JSON"})
     if status not in (200, 201):
-        fail(f"POST /subscription-templates -> HTTP {status}: {data}")
-    tpl = data.get("response", data)
-    if "uuid" not in tpl:
-        fail(f"POST /subscription-templates вернул неожиданный формат ответа: {tpl}")
+        retry = find_subscription_template_by_name(safe_name)
+        if not retry:
+            fail(f"POST /subscription-templates -> HTTP {status}: {data}")
+        warn(f"POST вернул HTTP {status}, но шаблон '{safe_name}' всё же создался ({retry['uuid']}) — продолжаю")
+        tpl = retry
+    else:
+        tpl = data.get("response", data)
+        if "uuid" not in tpl:
+            fail(f"POST /subscription-templates вернул неожиданный формат ответа: {tpl}")
     tpl_uuid = tpl["uuid"]
     _created["subscription-template"] = tpl_uuid
 
