@@ -50,7 +50,12 @@ COUNTRY_FLAGS = {
 # к ним, а injectHosts по tagRegex подставляет любую живую ноду с этим
 # тегом (тег на реальном хосте ноды проставляет balancer.py по здоровью).
 AUTO_POOL_HOSTS = {
-    "BALANCER_WIFI":   ("🏠 Auto ДЛЯ ДОМАШНЕГО ИНТЕРНЕТА", "Balancer_Wifi"),
+    # Happ достаёт иконку сервера ТОЛЬКО из emoji-флага в начале названия
+    # (https://www.happ.su/main/ru/dev-docs/emoji#flagi) — обычные emoji
+    # (дом/телефон) иконкой не становятся, остаются текстом. 🏳️ (белый
+    # флаг) технически тоже "флаг"-emoji — используем как icon-триггер,
+    # смысловой emoji (🏠/📱) оставляем сразу за ним как текст.
+    "BALANCER_WIFI":   ("🏳️ 🏠 Auto ДЛЯ ДОМАШНЕГО ИНТЕРНЕТА", "Balancer_Wifi"),
     "BALANCER_MOBILE": ("📱 Auto ДЛЯ МОБИЛЬНОГО ИНТЕРНЕТА", "Balancer_Mobile"),
 }
 
