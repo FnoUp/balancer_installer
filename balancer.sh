@@ -302,8 +302,7 @@ show_menu() {
     echo -e "  ${DIM}── Ноды ──────────────────────────────────${NC}"
     echo -e "  ${BLUE}2)${NC} Добавить новую ноду"
     echo -e "  ${BLUE}3)${NC} Автодобавление ноды (полная автоматизация)"
-    echo -e "       ${DIM}(для уже настроенной ноды — сама подтягивает её из Remnawave,${NC}"
-    echo -e "       ${DIM} сама определяет интерфейс/IP, создаёт хост + шаблон подписки)${NC}"
+    echo -e "       ${DIM}(добавить/удалить ноду, аудит осиротевших объектов)${NC}"
     echo -e "  ${BLUE}4)${NC} Исправить/удалить ноду"
     echo -e "       ${DIM}(если ошибся при вводе — удалит и даст ввести заново)${NC}"
     echo -e "  ${BLUE}5)${NC} Статус нод и score"
@@ -352,7 +351,20 @@ handle() {
         curl -4 -Ls "$BASE_URL/auto_add_node.py" -o "$AUTO_ADD_NODE_PY" && [ -s "$AUTO_ADD_NODE_PY" ] \
             || { echo -e "  ${RED}[ERROR]${NC} Не удалось скачать auto_add_node.py"; pause; show_menu; return; }
         echo ""
-        python3 "$AUTO_ADD_NODE_PY"
+        echo -e "  ${BOLD}Автодобавление:${NC}"
+        echo ""
+        echo -e "  ${BLUE}1)${NC} Добавить ноду(-ы)  ${DIM}(можно несколько подряд за один запуск)${NC}"
+        echo -e "  ${BLUE}2)${NC} Удалить ноду полностью  ${DIM}(хост + скрытый хост + шаблон + balancer.py + Prometheus)${NC}"
+        echo -e "  ${BLUE}3)${NC} Аудит  ${DIM}(найти осиротевшие хосты/шаблоны в Remnawave)${NC}"
+        echo ""
+        read -rp "  Выбор: " AUTO_SUB
+        echo ""
+        case "$AUTO_SUB" in
+            1) python3 "$AUTO_ADD_NODE_PY" ;;
+            2) python3 "$AUTO_ADD_NODE_PY" --remove ;;
+            3) python3 "$AUTO_ADD_NODE_PY" --audit ;;
+            *) echo "  Отмена." ;;
+        esac
         pause; show_menu
         ;;
 

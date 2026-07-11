@@ -8,6 +8,11 @@ auto_add_node.py — запускается на панели
   - виртуальный хост-держатель для device-route RU
   - JSON-шаблон подписки для виртуального хоста
   - регистрирует ноду в balancer.py (через add_node.apply_node_to_configs)
+
+Режимы запуска:
+  python3 auto_add_node.py           — добавить одну или несколько нод подряд
+  python3 auto_add_node.py --remove  — полностью удалить ноду (Remnawave + balancer.py + Prometheus)
+  python3 auto_add_node.py --audit   — найти осиротевшие объекты (шаблон без хоста, хост без ноды и т.п.)
 """
 
 import ipaddress
@@ -21,9 +26,9 @@ import urllib.error
 import urllib.request
 
 from add_node import (
-    BALANCER_FILE,
+    BALANCER_FILE, SVC_NAME, NODES_YML, DOCKER_YML, PING_YML,
     ask, ask_net_device, ask_pool_tag, apply_node_to_configs,
-    info, success, warn, error,
+    info, success, warn, error, _remove_ip_from_yml,
 )
 
 # Общий "VirtualHost" config-profile (shadowsocks-инбаунд, ни на одну ноду
@@ -516,6 +521,48 @@ def attach_template_to_host(host_uuid, template_uuid):
     success("Шаблон привязан")
 
 
+def self_check(real_host_uuid, virtual_host_uuid, template_uuid, pool_tag):
+    """Перечитываем созданные объекты через GET и сверяем ключевые поля —
+    ловит случаи, когда POST/PATCH вернул 200/201, но объект на деле не
+    такой, каким мы его создавали (уже бывало с subscription-templates,
+    см. комментарий в create_subscription_template). Ничего не удаляет и
+    не блокирует выполнение — только предупреждает."""
+    ok = True
+    hosts = rw_get("/hosts")
+    real = next((h for h in hosts if h.get("uuid") == real_host_uuid), None)
+    virt = next((h for h in hosts if h.get("uuid") == virtual_host_uuid), None)
+
+    if not real:
+        warn("Самопроверка: реальный хост не находится через GET /hosts")
+        ok = False
+    elif pool_tag not in (real.get("tags") or []):
+        warn(f"Самопроверка: у реального хоста нет тега пула {pool_tag}")
+        ok = False
+
+    if not virt:
+        warn("Самопроверка: скрытый хост не находится через GET /hosts")
+        ok = False
+    else:
+        if not virt.get("isHidden"):
+            warn("Самопроверка: скрытый хост не помечен isHidden")
+            ok = False
+        if virt.get("xrayJsonTemplateUuid") != template_uuid:
+            warn("Самопроверка: у скрытого хоста не привязан созданный шаблон подписки")
+            ok = False
+
+    status, data = rw_request("GET", "/subscription-templates")
+    templates = (data.get("response", data) or {}).get("templates", [])
+    if not any(t.get("uuid") == template_uuid for t in templates):
+        warn("Самопроверка: шаблон подписки не находится через GET /subscription-templates")
+        ok = False
+
+    if ok:
+        success("Самопроверка пройдена — все объекты на месте и согласованы")
+    else:
+        warn("Самопроверка нашла расхождения — см. предупреждения выше, проверь вручную в Remnawave")
+    return ok
+
+
 def ensure_auto_pool_hosts():
     """Два общих клиентских авто-хоста (WiFi/Mobile), которые и отвечают за
     балансировку при подключении к ним — идемпотентно: если уже есть хост
@@ -553,12 +600,187 @@ def ensure_auto_pool_hosts():
         attach_template_to_host(host["uuid"], tpl_uuid)
 
 
-# ── main ────────────────────────────────────────────────────────
-def main():
-    if os.geteuid() != 0:
-        error("Запусти от root: sudo python3 auto_add_node.py")
+# ── Удаление ноды (обратная операция) ────────────────────────────
+def list_balancer_nodes():
+    """Тот же паттерн парсинга NODES из balancer.py, что и в пункте
+    «Исправить/удалить ноду» в balancer.sh — держим в одном месте логику,
+    сверяться приходится вручную в обоих файлах при правке формата."""
+    with open(BALANCER_FILE) as f:
+        content = f.read()
+    blocks = re.findall(r'\{[^{}]*\}', content, re.DOTALL)
+    raw_nodes = [b for b in blocks if '"prom_instance"' in b]
+    result = []
+    for b in raw_nodes:
+        def field(k):
+            m = re.search(r'"' + k + r'"\s*:\s*"([^"]*)"', b)
+            return m.group(1) if m else ""
+        result.append({
+            "name": field("name"),
+            "host_uuid": field("host_uuid"),
+            "prom_instance": field("prom_instance"),
+            "pool_tag": field("pool_tag"),
+        })
+    return result
 
-    ensure_auto_pool_hosts()
+
+def remove_node_entry_from_balancer_py(ip):
+    with open(BALANCER_FILE) as f:
+        content = f.read()
+    new_content = re.sub(
+        r'\s*\{[^}]*"prom_instance":\s*"' + re.escape(ip) + r':[^}]*\},?',
+        "", content, flags=re.DOTALL,
+    )
+    with open(BALANCER_FILE, "w") as f:
+        f.write(new_content)
+
+
+def remove_node():
+    nodes = list_balancer_nodes()
+    if not nodes:
+        error("В balancer.py нет ни одной ноды (список NODES пуст)")
+
+    print()
+    print("=" * 60)
+    print("   Удаление ноды — полностью (Remnawave + balancer.py + Prometheus)")
+    print("=" * 60)
+    print()
+    for i, n in enumerate(nodes, 1):
+        ip = n["prom_instance"].split(":")[0]
+        print(f"    {i}) {n['name']}  IP={ip}  пул={n['pool_tag']}")
+    print()
+
+    choice = ask("Номер ноды для удаления")
+    try:
+        idx = int(choice)
+        if not (1 <= idx <= len(nodes)):
+            raise ValueError
+    except (ValueError, TypeError):
+        error("Неверный номер ноды")
+    node = nodes[idx - 1]
+    ip = node["prom_instance"].split(":")[0]
+
+    hosts = rw_get("/hosts")
+    real_host = next((h for h in hosts if h.get("uuid") == node["host_uuid"]), None)
+    virtual_host = None
+    if not real_host:
+        warn(f"Хост {node['host_uuid']} не найден в Remnawave (уже удалён вручную?) — почищу только balancer.py/Prometheus")
+    else:
+        vh_remark = f"{real_host.get('remark', '')} (VH device-route RU)"[:40]
+        virtual_host = next((h for h in hosts if h.get("remark") == vh_remark), None)
+        if not virtual_host:
+            warn(f"Скрытый хост-держатель «{vh_remark}» не найден — возможно, уже удалён")
+
+    template_uuid = virtual_host.get("xrayJsonTemplateUuid") if virtual_host else None
+
+    print()
+    print("─" * 50)
+    warn("Будет удалено:")
+    print(f"    Нода:              {node['name']}  ({ip})")
+    if real_host:
+        print(f"    Реальный хост:     {real_host['uuid']} ({real_host.get('remark')})")
+    if virtual_host:
+        print(f"    Скрытый хост:      {virtual_host['uuid']} ({virtual_host.get('remark')})")
+    if template_uuid:
+        print(f"    Шаблон подписки:   {template_uuid}")
+    print("    Запись в balancer.py и Prometheus targets")
+    print("─" * 50)
+    if ask("Подтвердить удаление? (yes/n)", "n").lower() != "yes":
+        print("Отмена."); sys.exit(0)
+
+    if template_uuid:
+        status, data = rw_request("DELETE", f"/subscription-templates/{template_uuid}")
+        success(f"Шаблон подписки удалён: {template_uuid}") if status == 200 \
+            else warn(f"Не удалось удалить шаблон {template_uuid}: HTTP {status} {data}")
+
+    if virtual_host:
+        status, data = rw_request("DELETE", f"/hosts/{virtual_host['uuid']}")
+        success(f"Скрытый хост удалён: {virtual_host['uuid']}") if status == 200 \
+            else warn(f"Не удалось удалить скрытый хост: HTTP {status} {data}")
+
+    if real_host:
+        status, data = rw_request("DELETE", f"/hosts/{real_host['uuid']}")
+        success(f"Реальный хост удалён: {real_host['uuid']}") if status == 200 \
+            else warn(f"Не удалось удалить реальный хост: HTTP {status} {data}")
+
+    remove_node_entry_from_balancer_py(ip)
+    success("Запись удалена из balancer.py")
+
+    n_removed = sum(_remove_ip_from_yml(p, ip) for p in (NODES_YML, DOCKER_YML, PING_YML))
+    success(f"Удалено {n_removed} запис(ей) из Prometheus targets")
+
+    subprocess.run(["systemctl", "restart", "prometheus"], check=False)
+    subprocess.run(["systemctl", "restart", SVC_NAME], check=False)
+    success(f"Prometheus и {SVC_NAME} перезапущены")
+
+    print()
+    print("=" * 60)
+    success(f"Нода {node['name']} полностью удалена")
+    print("=" * 60)
+    print()
+
+
+# ── Аудит: поиск осиротевших объектов ────────────────────────────
+def audit():
+    print()
+    print("=" * 60)
+    print("   Аудит — поиск осиротевших объектов в Remnawave")
+    print("=" * 60)
+    print()
+
+    nodes = rw_get("/nodes")
+    hosts = rw_get("/hosts")
+    status, data = rw_request("GET", "/subscription-templates")
+    templates = (data.get("response", data) or {}).get("templates", [])
+    balancer_nodes = list_balancer_nodes()
+
+    node_addrs = {n.get("address") for n in nodes}
+    host_by_uuid = {h["uuid"]: h for h in hosts}
+    templates_in_use = {h.get("xrayJsonTemplateUuid") for h in hosts if h.get("xrayJsonTemplateUuid")}
+    hosts_addrs = {h.get("address") for h in hosts}
+
+    issues = []
+
+    for h in hosts:
+        addr = h.get("address")
+        if addr not in node_addrs and addr != VIRTUAL_HOST_ADDRESS:
+            issues.append(
+                f"Хост «{h.get('remark')}» ({h['uuid']}) указывает на адрес {addr}, "
+                f"которого нет среди нод Remnawave (нода удалена/переехала?)"
+            )
+
+    for t in templates:
+        # "Default" — встроенные глобальные фолбэк-шаблоны Remnawave (по одному
+        # на каждый templateType: XRAY_JSON/MIHOMO/STASH/CLASH/SINGBOX),
+        # к хосту никогда не привязываются по дизайну — не орфаны.
+        if t.get("name") == "Default":
+            continue
+        if t["uuid"] not in templates_in_use:
+            issues.append(f"Шаблон подписки «{t.get('name')}» ({t['uuid']}) не привязан ни к одному хосту")
+
+    for n in balancer_nodes:
+        if n["host_uuid"] and n["host_uuid"] not in host_by_uuid:
+            issues.append(f"balancer.py: нода «{n['name']}» ссылается на несуществующий host_uuid {n['host_uuid']}")
+
+    for n in nodes:
+        has_profile = (n.get("configProfile") or {}).get("activeConfigProfileUuid")
+        if has_profile and n.get("address") not in hosts_addrs:
+            issues.append(
+                f"Нода «{n.get('name')}» ({n.get('address')}) настроена (есть config-profile), "
+                f"но для неё нет ни одного хоста — не онбордена через автодобавление"
+            )
+
+    if not issues:
+        success("Осиротевших объектов не найдено — всё согласовано")
+    else:
+        warn(f"Найдено проблем: {len(issues)}")
+        for i, msg in enumerate(issues, 1):
+            print(f"  {i}. {msg}")
+    print()
+
+
+# ── main ────────────────────────────────────────────────────────
+def onboard_one_node():
+    _created.clear()  # трекер "уже создано" — только для текущей ноды
 
     node = discover_nodes()
     address = node["address"]
@@ -592,7 +814,8 @@ def main():
     info(f"Имя хоста:     {remark}")
     print("─" * 50)
     if ask("Создать хост и шаблон подписки? (y/n)", "y").lower() != "y":
-        print("Отмена."); sys.exit(0)
+        print("Отмена этой ноды.")
+        return
 
     real_host = create_real_host(node, profile_uuid, inbound_uuid, remark, pool_tag)
     virtual_host = create_virtual_holder_host(remark, real_host["uuid"], node, profile_uuid, inbound_uuid)
@@ -605,6 +828,8 @@ def main():
         net_dev=net_dev, host_uuid=real_host["uuid"], pool_tag=pool_tag, tg_name=remark,
     )
 
+    self_check(real_host["uuid"], virtual_host["uuid"], template_uuid, pool_tag)
+
     print()
     print("=" * 60)
     success("Автодобавление ноды завершено")
@@ -615,5 +840,26 @@ def main():
     print()
 
 
+def main():
+    ensure_auto_pool_hosts()
+
+    while True:
+        onboard_one_node()
+        if ask("Добавить ещё одну ноду? (y/n)", "n").lower() != "y":
+            break
+
+    print()
+    success("Готово")
+    print()
+
+
 if __name__ == "__main__":
-    main()
+    if os.geteuid() != 0:
+        error("Запусти от root: sudo python3 auto_add_node.py")
+
+    if "--remove" in sys.argv:
+        remove_node()
+    elif "--audit" in sys.argv:
+        audit()
+    else:
+        main()
