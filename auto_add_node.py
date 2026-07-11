@@ -46,6 +46,14 @@ COUNTRY_FLAGS = {
     "PL": ("🇵🇱", "Poland"),
 }
 
+# Два общих клиентских хоста-балансировщика — клиент подключается именно
+# к ним, а injectHosts по tagRegex подставляет любую живую ноду с этим
+# тегом (тег на реальном хосте ноды проставляет balancer.py по здоровью).
+AUTO_POOL_HOSTS = {
+    "BALANCER_WIFI":   ("Auto ДЛЯ ДОМАШНЕГО ИНТЕРНЕТА", "Balancer_Wifi"),
+    "BALANCER_MOBILE": ("Auto ДЛЯ МОБИЛЬНОГО ИНТЕРНЕТА BRIDGE", "Balancer_Mobile"),
+}
+
 
 def sanitize_name(s, fallback="node"):
     """subscription-template имена принимают только [A-Za-z0-9_\\s-],
@@ -259,6 +267,9 @@ def resolve_remark(node):
 
 # ── hosts ──────────────────────────────────────────────────────
 def create_real_host(node, profile_uuid, inbound_uuid, remark):
+    # Невидимый клиенту хост: он не выбирается напрямую в приложении, а
+    # существует только как цель для tagRegex-инжекта из авто-хостов
+    # WiFi/Mobile (тег на нём проставляет balancer.py по здоровью ноды).
     # inbound вложен в отдельный объект (CreateHostInboundData в remnawave/python-sdk),
     # плоские configProfileUuid/configProfileInboundUuid на верхнем уровне не принимаются.
     payload = {
@@ -270,6 +281,7 @@ def create_real_host(node, profile_uuid, inbound_uuid, remark):
             "configProfileInboundUuid": inbound_uuid,
         },
         "fingerprint": "firefox",
+        "isHidden": True,
     }
     status, data = rw_request("POST", "/hosts", payload)
     if status not in (200, 201):
@@ -329,58 +341,103 @@ def create_virtual_holder_host(remark_base, real_host_uuid):
     return host
 
 
-# ── Подписной JSON-шаблон (по образцу Client_SingleNode_Template.txt) ──
-def build_subscription_template(real_host_uuid):
+# ── Подписные JSON-шаблоны (по образцу Templates/*.txt) ──
+def _client_dns():
     return {
-        "dns": {
-            "hosts": {
-                "cloudflare-dns.com": "1.1.1.1",
-                "dns.yandex.ru": "77.88.8.8",
-                "dns.google": "8.8.8.8",
-                "dns.quad9.net": "9.9.9.9",
-            },
-            "servers": [
-                {"address": "https://dns.yandex.ru/dns-query",
-                 "domains": ["domain:ru", "domain:su", "domain:xn--p1ai"],
-                 "skipFallback": True},
-                {"address": "https://cloudflare-dns.com/dns-query", "skipFallback": True},
-            ],
-            "queryStrategy": "UseIP",
+        "hosts": {
+            "cloudflare-dns.com": "1.1.1.1",
+            "dns.yandex.ru": "77.88.8.8",
+            "dns.google": "8.8.8.8",
+            "dns.quad9.net": "9.9.9.9",
         },
+        "servers": [
+            {"address": "https://dns.yandex.ru/dns-query",
+             "domains": ["domain:ru", "domain:su", "domain:xn--p1ai"],
+             "skipFallback": True},
+            {"address": "https://cloudflare-dns.com/dns-query", "skipFallback": True},
+        ],
+        "queryStrategy": "UseIP",
+    }
+
+
+def _client_direct_rules():
+    return [
+        {"type": "field", "protocol": ["bittorrent"], "outboundTag": "direct"},
+        {"type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block"},
+        {"type": "field", "domain": [
+            "domain:ru", "domain:su", "domain:xn--p1ai",
+            "domain:vk.com", "domain:vk.me", "domain:userapi.com",
+            "domain:yandex.net", "domain:yandex.com", "domain:ya.ru",
+            "domain:mail.ru", "domain:ok.ru", "domain:sberbank.ru", "domain:gosuslugi.ru",
+        ], "outboundTag": "direct"},
+        {"type": "field", "ip": [
+            "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+            "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255",
+        ], "outboundTag": "direct"},
+    ]
+
+
+def _client_inbounds():
+    return [
+        {"tag": "socks", "port": "10808", "listen": "127.0.0.1", "protocol": "socks",
+         "settings": {"udp": True, "auth": "noauth"},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
+        {"tag": "http", "port": "10809", "listen": "127.0.0.1", "protocol": "http",
+         "settings": {"allowTransparent": False},
+         "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
+    ]
+
+
+def _client_outbounds():
+    return [
+        {"tag": "direct", "protocol": "freedom"},
+        {"tag": "block", "protocol": "blackhole"},
+    ]
+
+
+def build_subscription_template(real_host_uuid):
+    """Шаблон для ОДНОЙ конкретной ноды — инжектит по UUID реального хоста
+    (по образцу Client_SingleNode_Template.txt)."""
+    return {
+        "dns": _client_dns(),
         "routing": {
-            "rules": [
-                {"type": "field", "protocol": ["bittorrent"], "outboundTag": "direct"},
-                {"type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block"},
-                {"type": "field", "domain": [
-                    "domain:ru", "domain:su", "domain:xn--p1ai",
-                    "domain:vk.com", "domain:vk.me", "domain:userapi.com",
-                    "domain:yandex.net", "domain:yandex.com", "domain:ya.ru",
-                    "domain:mail.ru", "domain:ok.ru", "domain:sberbank.ru", "domain:gosuslugi.ru",
-                ], "outboundTag": "direct"},
-                {"type": "field", "ip": [
-                    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-                    "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255",
-                ], "outboundTag": "direct"},
+            "rules": _client_direct_rules() + [
                 {"type": "field", "network": "tcp,udp", "outboundTag": "proxy"},
             ],
             "domainMatcher": "hybrid",
             "domainStrategy": "IPIfNonMatch",
         },
-        "inbounds": [
-            {"tag": "socks", "port": "10808", "listen": "127.0.0.1", "protocol": "socks",
-             "settings": {"udp": True, "auth": "noauth"},
-             "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
-            {"tag": "http", "port": "10809", "listen": "127.0.0.1", "protocol": "http",
-             "settings": {"allowTransparent": False},
-             "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
-        ],
-        "outbounds": [
-            {"tag": "direct", "protocol": "freedom"},
-            {"tag": "block", "protocol": "blackhole"},
-        ],
+        "inbounds": _client_inbounds(),
+        "outbounds": _client_outbounds(),
         "remnawave": {
             "injectHosts": [{
                 "selector": {"type": "uuids", "values": [real_host_uuid]},
+                "tagPrefix": "proxy",
+                "selectFrom": "ALL",
+            }]
+        },
+    }
+
+
+def build_pool_subscription_template(pool_tag, balancer_name):
+    """Шаблон для авто-хоста балансировщика — инжектит ЛЮБОЙ хост с этим
+    тегом (по образцу Templates/Balancer_Client_Template.txt), Xray сам
+    случайно выбирает между всеми подставленными живыми нодами."""
+    return {
+        "dns": _client_dns(),
+        "routing": {
+            "rules": _client_direct_rules() + [
+                {"type": "field", "network": "tcp,udp", "balancerTag": balancer_name},
+            ],
+            "balancers": [{"tag": balancer_name, "selector": ["proxy"], "strategy": {"type": "random"}}],
+            "domainMatcher": "hybrid",
+            "domainStrategy": "IPIfNonMatch",
+        },
+        "inbounds": _client_inbounds(),
+        "outbounds": _client_outbounds(),
+        "remnawave": {
+            "injectHosts": [{
+                "selector": {"type": "tagRegex", "pattern": pool_tag},
                 "tagPrefix": "proxy",
                 "selectFrom": "ALL",
             }]
@@ -411,13 +468,52 @@ def attach_template_to_host(host_uuid, template_uuid):
     status, data = rw_request("PATCH", "/hosts", {"uuid": host_uuid, "xrayJsonTemplateUuid": template_uuid})
     if status != 200:
         fail(f"PATCH /hosts (привязка шаблона) -> HTTP {status}: {data}")
-    success("Шаблон привязан к виртуальному хосту")
+    success("Шаблон привязан")
+
+
+def ensure_auto_pool_hosts():
+    """Два общих клиентских авто-хоста (WiFi/Mobile), которые и отвечают за
+    балансировку при подключении к ним — идемпотентно: если уже есть хост
+    с таким remark, пропускает, ничего не дублирует."""
+    hosts = rw_get("/hosts")
+    for pool_tag, (remark, balancer_name) in AUTO_POOL_HOSTS.items():
+        existing = next((h for h in hosts if h.get("remark") == remark), None)
+        if existing:
+            info(f"Автохост «{remark}» уже существует ({existing['uuid']}) — пропускаю")
+            continue
+
+        profile, ss_inbound = get_virtual_host_profile()
+        payload = {
+            "remark": remark,
+            "address": VIRTUAL_HOST_ADDRESS,
+            "port": ss_inbound["port"],
+            "inbound": {
+                "configProfileUuid": profile["uuid"],
+                "configProfileInboundUuid": ss_inbound["uuid"],
+            },
+            "fingerprint": "firefox",
+            "tags": [pool_tag],
+        }
+        status, data = rw_request("POST", "/hosts", payload)
+        if status not in (200, 201):
+            fail(f"POST /hosts (автохост {remark}) -> HTTP {status}: {data}")
+        host = data.get("response", data)
+        if "uuid" not in host:
+            fail(f"POST /hosts (автохост {remark}) вернул неожиданный формат ответа: {host}")
+        _created[f"auto-host-{pool_tag}"] = host["uuid"]
+        success(f"Автохост «{remark}» создан: {host['uuid']}")
+
+        tpl_json = build_pool_subscription_template(pool_tag, balancer_name)
+        tpl_uuid = create_subscription_template(balancer_name, tpl_json)
+        attach_template_to_host(host["uuid"], tpl_uuid)
 
 
 # ── main ────────────────────────────────────────────────────────
 def main():
     if os.geteuid() != 0:
         error("Запусти от root: sudo python3 auto_add_node.py")
+
+    ensure_auto_pool_hosts()
 
     node = discover_nodes()
     address = node["address"]
