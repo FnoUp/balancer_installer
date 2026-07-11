@@ -267,9 +267,10 @@ def resolve_remark(node):
 
 # ── hosts ──────────────────────────────────────────────────────
 def create_real_host(node, profile_uuid, inbound_uuid, remark):
-    # Невидимый клиенту хост: он не выбирается напрямую в приложении, а
-    # существует только как цель для tagRegex-инжекта из авто-хостов
-    # WiFi/Mobile (тег на нём проставляет balancer.py по здоровью ноды).
+    # Видимый клиенту хост — обычная прямая точка входа на реальный
+    # инбаунд ноды. Тег (BALANCER_WIFI/MOBILE) на нём проставляет
+    # balancer.py по здоровью ноды, поэтому он же участвует и в
+    # tagRegex-инжекте из авто-хостов WiFi/Mobile.
     hosts = rw_get("/hosts")
     dup = next((h for h in hosts if h.get("remark") == remark), None)
     if dup:
@@ -288,7 +289,6 @@ def create_real_host(node, profile_uuid, inbound_uuid, remark):
             "configProfileInboundUuid": inbound_uuid,
         },
         "fingerprint": "firefox",
-        "isHidden": True,
     }
     status, data = rw_request("POST", "/hosts", payload)
     if status not in (200, 201):
@@ -302,6 +302,9 @@ def create_real_host(node, profile_uuid, inbound_uuid, remark):
 
 
 def get_virtual_host_profile():
+    """Общий decoy-профиль VirtualHost — используется ТОЛЬКО для авто-хостов
+    WiFi/Mobile (у них нет одной конкретной ноды-владельца). Per-node хосты
+    используют реальный профиль/инбаунд самой ноды, не этот."""
     status, data = rw_request("GET", "/config-profiles")
     profiles = (data.get("response", data) or {}).get("configProfiles", [])
     profile = next((p for p in profiles if p.get("uuid") == VIRTUAL_HOST_PROFILE_UUID), None)
@@ -317,8 +320,14 @@ def get_virtual_host_profile():
     return profile, ss_inbound
 
 
-def create_virtual_holder_host(remark_base, real_host_uuid):
-    remark = f"{remark_base} (device-route RU)"[:40]
+def create_virtual_holder_host(remark_base, real_host_uuid, node, profile_uuid, inbound_uuid):
+    # Скрытый хост-держатель для device-route RU: не выбирается клиентом
+    # напрямую (isHidden), существует только чтобы нести JSON-шаблон,
+    # который инжектит по UUID видимый реальный хост (self-injection в
+    # Remnawave запрещён — хост не может инжектить сам себя, поэтому нужен
+    # отдельный объект). Профиль/инбаунд — тот же, что у самой ноды
+    # (не decoy VirtualHost — тот только для авто-хостов WiFi/Mobile).
+    remark = f"{remark_base} (VH device-route RU)"[:40]
     hosts = rw_get("/hosts")
     dup = next((h for h in hosts if h.get("remark") == remark), None)
     if dup:
@@ -326,25 +335,25 @@ def create_virtual_holder_host(remark_base, real_host_uuid):
         if ask("Всё равно создать ещё один? (y/n)", "n").lower() != "y":
             return dup
 
-    profile, ss_inbound = get_virtual_host_profile()
     payload = {
         "remark": remark,
-        "address": VIRTUAL_HOST_ADDRESS,
-        "port": ss_inbound["port"],
+        "address": node["address"],
+        "port": 443,
         "inbound": {
-            "configProfileUuid": profile["uuid"],
-            "configProfileInboundUuid": ss_inbound["uuid"],
+            "configProfileUuid": profile_uuid,
+            "configProfileInboundUuid": inbound_uuid,
         },
         "fingerprint": "firefox",
+        "isHidden": True,
     }
     status, data = rw_request("POST", "/hosts", payload)
     if status not in (200, 201):
-        fail(f"POST /hosts (виртуальный хост) -> HTTP {status}: {data}")
+        fail(f"POST /hosts (скрытый хост) -> HTTP {status}: {data}")
     host = data.get("response", data)
     if "uuid" not in host:
-        fail(f"POST /hosts (виртуальный хост) вернул неожиданный формат ответа: {host}")
+        fail(f"POST /hosts (скрытый хост) вернул неожиданный формат ответа: {host}")
     _created["virtual-host"] = host["uuid"]
-    success(f"Виртуальный хост-держатель создан: {host['uuid']} ({remark})")
+    success(f"Скрытый хост-держатель создан: {host['uuid']} ({remark})")
     return host
 
 
@@ -581,7 +590,7 @@ def main():
         print("Отмена."); sys.exit(0)
 
     real_host = create_real_host(node, profile_uuid, inbound_uuid, remark)
-    virtual_host = create_virtual_holder_host(remark, real_host["uuid"])
+    virtual_host = create_virtual_holder_host(remark, real_host["uuid"], node, profile_uuid, inbound_uuid)
     template_json = build_subscription_template(real_host["uuid"])
     template_uuid = create_subscription_template(f"{remark}_Direct", template_json)
     attach_template_to_host(virtual_host["uuid"], template_uuid)
