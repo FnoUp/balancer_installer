@@ -39,7 +39,7 @@ BALANCER_SVC="${SVC_NAME:-vpn-balancer}"
 BALANCER_LOG="/var/log/${SVC_NAME:-vpn-balancer}/balancer.log"
 
 # ══════════════════════════════════════════════════════════════
-# ОБНОВЛЕНИЕ СКРИПТОВ (общее для панели и ноды)
+# ОБНОВЛЕНИЕ / УСТАНОВКА (общее для панели и ноды)
 # ══════════════════════════════════════════════════════════════
 update_panel_scripts() {
     echo -e "  ${BLUE}[INFO]${NC} Обновляем вспомогательные скрипты..."
@@ -109,6 +109,51 @@ update_script_menu() {
     case "$ROLE_CHOICE" in
         1) update_panel_scripts ;;
         2) update_node_scripts ;;
+        *) echo "  Отмена." ;;
+    esac
+}
+
+reinstall_panel_from_scratch() {
+    echo -e "  ${RED}Будет удалено:${NC}"
+    echo -e "    /opt/$BALANCER_SVC/"
+    echo -e "    /etc/systemd/system/$BALANCER_SVC.service"
+    echo -e "    $TARGETS_DIR/*.yml"
+    echo -e "    /var/log/$BALANCER_SVC/"
+    echo -e "    /etc/vpn-balancer/config"
+    echo -e "    /tmp/add_node.py"
+    echo -e "    /usr/local/bin/balancer"
+    echo ""
+    echo -e "  ${YELLOW}Docker, Prometheus, node_exporter, iptables — не трогаем${NC}"
+    echo ""
+    read -rp "  Подтвердить? (yes/n): " CONFIRM
+    if [ "$CONFIRM" = "yes" ]; then
+        systemctl stop "$BALANCER_SVC"    2>/dev/null || true
+        systemctl disable "$BALANCER_SVC" 2>/dev/null || true
+        rm -rf "/opt/$BALANCER_SVC" "/var/log/$BALANCER_SVC" /tmp/add_node.py /tmp/auto_add_node.py /etc/vpn-balancer
+        rm -f "/etc/systemd/system/$BALANCER_SVC.service" /usr/local/bin/balancer
+        rm -f "$TARGETS_DIR"/vpn_nodes.yml "$TARGETS_DIR"/docker.yml "$TARGETS_DIR"/ping.yml
+        systemctl daemon-reload
+        echo -e "  ${GREEN}[OK]${NC} Файлы удалены"
+        echo ""
+        exec bash <(curl -4 -Ls "$BASE_URL/setup.sh")
+    else
+        echo "  Отмена."
+    fi
+}
+
+install_update_menu() {
+    echo -e "  ${BOLD}Установка / обновление:${NC}"
+    echo ""
+    echo -e "  ${BLUE}1)${NC} Установить / обновить балансировщик"
+    echo -e "  ${BLUE}2)${NC} Переустановить с нуля (сброс)"
+    echo -e "  ${BLUE}3)${NC} Обновить скрипт (панель/нода)"
+    echo ""
+    read -rp "  Выбор: " SUB
+    echo ""
+    case "$SUB" in
+        1) update_panel_scripts ;;
+        2) reinstall_panel_from_scratch ;;
+        3) update_script_menu ;;
         *) echo "  Отмена." ;;
     esac
 }
@@ -251,24 +296,22 @@ show_menu() {
         && echo -e "${GREEN}● работает${NC}" || echo -e "${RED}● остановлен${NC}")"
     echo ""
     echo -e "  ${DIM}── Установка ─────────────────────────────${NC}"
-    echo -e "  ${BLUE}1)${NC} Установить / обновить балансировщик"
-    echo -e "  ${BLUE}2)${NC} Переустановить с нуля (сброс)"
+    echo -e "  ${BLUE}1)${NC} Установка / обновление"
+    echo -e "       ${DIM}(установить, обновить, переустановить с нуля, обновить скрипт)${NC}"
     echo ""
     echo -e "  ${DIM}── Ноды ──────────────────────────────────${NC}"
-    echo -e "  ${BLUE}3)${NC} Добавить новую ноду"
-    echo -e "  ${BLUE}4)${NC} Автодобавление ноды (полная автоматизация)"
+    echo -e "  ${BLUE}2)${NC} Добавить новую ноду"
+    echo -e "  ${BLUE}3)${NC} Автодобавление ноды (полная автоматизация)"
     echo -e "       ${DIM}(для уже настроенной ноды — сама подтягивает её из Remnawave,${NC}"
     echo -e "       ${DIM} сама определяет интерфейс/IP, создаёт хост + шаблон подписки)${NC}"
-    echo -e "  ${BLUE}5)${NC} Исправить/удалить ноду"
+    echo -e "  ${BLUE}4)${NC} Исправить/удалить ноду"
     echo -e "       ${DIM}(если ошибся при вводе — удалит и даст ввести заново)${NC}"
-    echo -e "  ${BLUE}6)${NC} Статус нод и score"
+    echo -e "  ${BLUE}5)${NC} Статус нод и score"
     echo ""
     echo -e "  ${DIM}── Управление ────────────────────────────${NC}"
-    echo -e "  ${BLUE}7)${NC} Логи балансировщика (live)"
-    echo -e "  ${BLUE}8)${NC} Перезапустить балансировщик"
-    echo -e "  ${BLUE}9)${NC} Перезапустить Prometheus"
-    echo -e "  ${BLUE}10)${NC} Перезапустить blackbox-exporter"
-    echo -e "  ${BLUE}11)${NC} Обновить скрипт (панель/нода)"
+    echo -e "  ${BLUE}6)${NC} Логи балансировщика (live)"
+    echo -e "  ${BLUE}7)${NC} Перезапустить сервисы"
+    echo -e "       ${DIM}(балансировщик / Prometheus / blackbox-exporter)${NC}"
     echo ""
     echo -e "  ${DIM}0) Выйти${NC}"
     echo ""
@@ -280,44 +323,14 @@ show_menu() {
 handle() {
     case "$1" in
 
-    # ── 1. Установить / обновить ────────────────────────────────
+    # ── 1. Установка / обновление ─────────────────────────────────
     1)
-        update_panel_scripts
+        install_update_menu
         pause; show_menu
         ;;
 
-    # ── 2. Переустановить с нуля ────────────────────────────────
+    # ── 2. Добавить ноду ────────────────────────────────────────
     2)
-        echo -e "  ${RED}Будет удалено:${NC}"
-        echo -e "    /opt/$BALANCER_SVC/"
-        echo -e "    /etc/systemd/system/$BALANCER_SVC.service"
-        echo -e "    $TARGETS_DIR/*.yml"
-        echo -e "    /var/log/$BALANCER_SVC/"
-        echo -e "    /etc/vpn-balancer/config"
-        echo -e "    /tmp/add_node.py"
-        echo -e "    /usr/local/bin/balancer"
-        echo ""
-        echo -e "  ${YELLOW}Docker, Prometheus, node_exporter, iptables — не трогаем${NC}"
-        echo ""
-        read -rp "  Подтвердить? (yes/n): " CONFIRM
-        if [ "$CONFIRM" = "yes" ]; then
-            systemctl stop "$BALANCER_SVC"    2>/dev/null || true
-            systemctl disable "$BALANCER_SVC" 2>/dev/null || true
-            rm -rf "/opt/$BALANCER_SVC" "/var/log/$BALANCER_SVC" /tmp/add_node.py /tmp/auto_add_node.py /etc/vpn-balancer
-            rm -f "/etc/systemd/system/$BALANCER_SVC.service" /usr/local/bin/balancer
-            rm -f "$TARGETS_DIR"/vpn_nodes.yml "$TARGETS_DIR"/docker.yml "$TARGETS_DIR"/ping.yml
-            systemctl daemon-reload
-            echo -e "  ${GREEN}[OK]${NC} Файлы удалены"
-            echo ""
-            exec bash <(curl -4 -Ls "$BASE_URL/setup.sh")
-        else
-            echo "  Отмена."
-            pause; show_menu
-        fi
-        ;;
-
-    # ── 3. Добавить ноду ────────────────────────────────────────
-    3)
         echo -e "  ${BOLD}Шаг 1 — запусти на ноде:${NC}"
         echo ""
         echo -e "    bash <(curl -4 -Ls \"$BASE_URL/setup.sh\")"
@@ -332,8 +345,8 @@ handle() {
         pause; show_menu
         ;;
 
-    # ── 4. Автодобавление ноды (полная автоматизация) ───────────
-    4)
+    # ── 3. Автодобавление ноды (полная автоматизация) ───────────
+    3)
         curl -4 -Ls "$BASE_URL/add_node.py" -o "$ADD_NODE_PY" && [ -s "$ADD_NODE_PY" ] \
             || { echo -e "  ${RED}[ERROR]${NC} Не удалось скачать add_node.py"; pause; show_menu; return; }
         curl -4 -Ls "$BASE_URL/auto_add_node.py" -o "$AUTO_ADD_NODE_PY" && [ -s "$AUTO_ADD_NODE_PY" ] \
@@ -343,8 +356,8 @@ handle() {
         pause; show_menu
         ;;
 
-    # ── 5. Исправить/удалить ноду ────────────────────────────────
-    5)
+    # ── 4. Исправить/удалить ноду ────────────────────────────────
+    4)
         echo -e "  ${BOLD}Список нод:${NC}"
         echo ""
         python3 - "$BALANCER_PY" << 'PYEOF'
@@ -599,57 +612,83 @@ PYEOF
         pause; show_menu
         ;;
 
-    # ── 6. Статус нод ───────────────────────────────────────────
-    6)
-        python3 - "$BALANCER_PY" << 'PYEOF'
-import re, sys
+    # ── 5. Статус нод (расширенный: score, users, ping, bw, cpu, ram) ──
+    5)
+        python3 - "$BALANCER_PY" "$BALANCER_LOG" << 'PYEOF'
+import re, sys, json, urllib.request
 
-BALANCER_PY = sys.argv[1] if len(sys.argv) > 1 else "/opt/vpn-balancer/balancer.py"
+BALANCER_PY, BALANCER_LOG = sys.argv[1], sys.argv[2]
 
 try:
-    with open(BALANCER_PY) as f:
-        content = f.read()
+    content = open(BALANCER_PY, encoding="utf-8").read()
 except FileNotFoundError:
     print("  balancer.py не найден")
     sys.exit(0)
 
 nodes_raw = re.findall(
-    r'\{[^}]*"name"\s*:\s*"([^"]+)"[^}]*"host_uuid"\s*:\s*"([^"]+)"[^}]*"prom_instance"\s*:\s*"([^"]+)"[^}]*\}',
+    r'\{[^}]*"name"\s*:\s*"([^"]+)"[^}]*"host_uuid"\s*:\s*"([^"]+)"[^}]*"pool_tag"\s*:\s*"([^"]+)"[^}]*\}',
     content, re.DOTALL
 )
-if not nodes_raw:
-    nodes_raw = re.findall(
-        r'"name"\s*:\s*"([^"]+)".*?"host_uuid"\s*:\s*"([^"]+)".*?"prom_instance"\s*:\s*"([^"]+)"',
-        content, re.DOTALL
-    )
-
 if not nodes_raw:
     print("  Ноды не найдены в balancer.py (список NODES пуст)")
     sys.exit(0)
 
-print(f"\n  {'Нода':<20} {'Prometheus':<25} Статус")
-print("  " + "─" * 60)
-for name, uuid, prom in nodes_raw:
+# живая привязка тегов пула — прямо из Remnawave
+api = re.search(r'REMNAWAVE_API\s*=\s*"([^"]+)"', content)
+tok = re.search(r'REMNAWAVE_TOKEN\s*=\s*"([^"]+)"', content)
+cook = re.search(r'REMNAWAVE_COOKIE\s*=\s*"([^"]+)"', content)
+hosts_by_uuid = {}
+if api and tok:
     try:
-        import urllib.request, json
-        url = f"http://localhost:9090/api/v1/query?query=up{{instance='{prom}'}}"
-        with urllib.request.urlopen(url, timeout=3) as r:
-            results = json.loads(r.read()).get("data", {}).get("result", [])
-            status = "UP" if results and results[0]["value"][1] == "1" else "DOWN"
-    except:
-        status = "?"
-    color = "\033[0;32m" if status == "UP" else ("\033[0;31m" if status == "DOWN" else "\033[1;33m")
-    print(f"  {name:<20} {prom:<25} {color}{status}\033[0m")
+        headers = {"Authorization": f"Bearer {tok.group(1)}"}
+        if cook and cook.group(1):
+            headers["Cookie"] = cook.group(1)
+        req = urllib.request.Request(f"{api.group(1)}/hosts", headers=headers)
+        with urllib.request.urlopen(req, timeout=5) as r:
+            for h in json.loads(r.read()).get("response", []):
+                hosts_by_uuid[h["uuid"]] = h
+    except Exception as e:
+        print(f"  {chr(0x26A0)} не удалось получить теги хостов: {e}")
+
+# последняя строка score= по каждой ноде из лога балансировщика
+log_by_name = {}
+try:
+    with open(BALANCER_LOG, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = re.search(r'\[INFO\]\s+(.+?)\s+\[(\w+)\]:\s+score=([\d.]+)\s+users=(\S+)\s+\|\s+(.+)', line)
+            if m:
+                log_by_name[m.group(1)] = {
+                    "score": m.group(3), "users": m.group(4), "detail": m.group(5).strip()
+                }
+except FileNotFoundError:
+    pass
+
+print()
+print(f"  {'Нода':<16} {'Пул':<16} {'В пуле':<7} {'Score':<7} Метрики")
+print("  " + "─" * 100)
+for name, uuid, pool_tag in nodes_raw:
+    host = hosts_by_uuid.get(uuid)
+    if host is None:
+        in_pool, pool_color = "?", "\033[1;33m"
+    else:
+        is_in = pool_tag in (host.get("tags") or [])
+        in_pool, pool_color = ("да", "\033[0;32m") if is_in else ("нет", "\033[0;31m")
+
+    info = log_by_name.get(name)
+    score = info["score"] if info else "?"
+    detail = info["detail"] if info else "нет данных в логе (жди следующий цикл, до 2 мин)"
+
+    print(f"  {name:<16} {pool_tag:<16} {pool_color}{in_pool:<7}\033[0m {score:<7} {detail}")
 
 print()
 PYEOF
         echo ""
         read -rp "  r = обновить, Enter = в меню: " SUB
-        if [ "$SUB" = "r" ]; then handle 6; else show_menu; fi
+        if [ "$SUB" = "r" ]; then handle 5; else show_menu; fi
         ;;
 
-    # ── 7. Логи ─────────────────────────────────────────────────
-    7)
+    # ── 6. Логи ─────────────────────────────────────────────────
+    6)
         if [ ! -f "$BALANCER_LOG" ]; then
             echo -e "  ${YELLOW}[WARN]${NC} Лог-файл не найден"
             pause; show_menu; return
@@ -660,34 +699,35 @@ PYEOF
         show_menu
         ;;
 
-    # ── 8. Перезапустить балансировщик ──────────────────────────
-    8)
-        systemctl restart "$BALANCER_SVC" \
-            && echo -e "  ${GREEN}[OK]${NC} Балансировщик перезапущен" \
-            || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
+    # ── 7. Перезапустить сервисы ──────────────────────────────────
+    7)
+        echo -e "  ${BOLD}Какой сервис перезапустить?${NC}"
+        echo ""
+        echo -e "  ${BLUE}1)${NC} Балансировщик"
+        echo -e "  ${BLUE}2)${NC} Prometheus"
+        echo -e "  ${BLUE}3)${NC} blackbox-exporter"
+        echo ""
+        read -rp "  Выбор: " SVC_CHOICE
+        echo ""
+        case "$SVC_CHOICE" in
+            1)
+                systemctl restart "$BALANCER_SVC" \
+                    && echo -e "  ${GREEN}[OK]${NC} Балансировщик перезапущен" \
+                    || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
+                ;;
+            2)
+                systemctl restart prometheus \
+                    && echo -e "  ${GREEN}[OK]${NC} Prometheus перезапущен" \
+                    || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
+                ;;
+            3)
+                docker restart blackbox-exporter 2>/dev/null \
+                    && echo -e "  ${GREEN}[OK]${NC} blackbox-exporter перезапущен" \
+                    || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить (контейнер не найден?)"
+                ;;
+            *) echo "  Отмена." ;;
+        esac
         sleep 1; show_menu
-        ;;
-
-    # ── 9. Перезапустить Prometheus ──────────────────────────────
-    9)
-        systemctl restart prometheus \
-            && echo -e "  ${GREEN}[OK]${NC} Prometheus перезапущен" \
-            || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить"
-        sleep 1; show_menu
-        ;;
-
-    # ── 10. Перезапустить blackbox-exporter ───────────────────────
-    10)
-        docker restart blackbox-exporter 2>/dev/null \
-            && echo -e "  ${GREEN}[OK]${NC} blackbox-exporter перезапущен" \
-            || echo -e "  ${RED}[ERROR]${NC} Не удалось перезапустить (контейнер не найден?)"
-        sleep 1; show_menu
-        ;;
-
-    # ── 11. Обновить скрипт (панель/нода) ─────────────────────────
-    11)
-        update_script_menu
-        pause; show_menu
         ;;
 
     0) echo ""; exit 0 ;;
