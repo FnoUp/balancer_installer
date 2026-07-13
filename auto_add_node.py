@@ -13,6 +13,7 @@ auto_add_node.py — запускается на панели
   python3 auto_add_node.py           — добавить одну или несколько нод подряд
   python3 auto_add_node.py --remove  — полностью удалить ноду (Remnawave + balancer.py + Prometheus)
   python3 auto_add_node.py --audit   — найти осиротевшие объекты (шаблон без хоста, хост без ноды и т.п.)
+  python3 auto_add_node.py --sort    — пересортировать хосты в панели (без добавления/удаления)
 """
 
 import ipaddress
@@ -61,6 +62,15 @@ AUTO_POOL_HOSTS = {
     # не становится. Так что просто emoji в названии как текст, без триггера.
     "BALANCER_WIFI":   ("🏠 Auto ДЛЯ ДОМАШНЕГО ИНТЕРНЕТА", "Balancer_Wifi"),
     "BALANCER_MOBILE": ("📱 Auto ДЛЯ МОБИЛЬНОГО ИНТЕРНЕТА", "Balancer_Mobile"),
+}
+
+# Имя скрытого VH-хоста для RU-нод, которые физически являются "мостом"
+# (RU — первый хоп, трафик уходит вторым хопом через другую страну) —
+# вместо обычного "{remark} (VH device-route RU)". Ключ — pool_tag, под
+# который заводится мост-нода (спрашивается у оператора при онбординге).
+BRIDGE_VH_NAMES = {
+    "BALANCER_WIFI":   "МОСТ ДЛЯ ДОМАШНЕГО ИНТЕРНЕТА 🇷🇺",
+    "BALANCER_MOBILE": "МОСТ ДЛЯ МОБИЛЬНОГО ИНТЕРНЕТА 🇷🇺",
 }
 
 
@@ -263,15 +273,41 @@ def detect_interface(address, resolved_ip):
     return matches[0] if len(matches) == 1 else None
 
 
-def resolve_remark(node):
-    code = node.get("countryCode", "")
-    if code in COUNTRY_FLAGS:
-        flag, name = COUNTRY_FLAGS[code]
-        default = f"{flag} {name}"
+def resolve_remark(node, default_override=None):
+    if default_override:
+        default = default_override
     else:
-        warn(f"Код страны '{code}' не в списке известных флагов.")
-        default = code or node.get("name", "node")
+        code = node.get("countryCode", "")
+        if code in COUNTRY_FLAGS:
+            flag, name = COUNTRY_FLAGS[code]
+            default = f"{flag} {name}"
+        else:
+            warn(f"Код страны '{code}' не в списке известных флагов.")
+            default = code or node.get("name", "node")
     return ask("Имя хоста (remark)", default)
+
+
+def ask_bridge_target():
+    """RU-нода как мост: спрашиваем, в какую страну уходит второй хоп —
+    этим именем называется видимый хост (не "Москва"/"Россия")."""
+    print()
+    print("  В какую страну уходит мост (второй хоп)?")
+    print()
+    codes = [c for c in COUNTRY_FLAGS if c != "RU"]
+    for i, c in enumerate(codes, 1):
+        flag, name = COUNTRY_FLAGS[c]
+        print(f"    {i}) {flag} {name}")
+    print(f"    {len(codes) + 1}) Другое (ввести вручную)")
+    print()
+    choice = ask(f"Выбор (1-{len(codes) + 1})", "1")
+    try:
+        idx = int(choice)
+    except ValueError:
+        idx = 1
+    if 1 <= idx <= len(codes):
+        flag, name = COUNTRY_FLAGS[codes[idx - 1]]
+        return f"{flag} {name}"
+    return ask("Имя страны (с флагом, если нужно)", "")
 
 
 # ── hosts ──────────────────────────────────────────────────────
@@ -330,14 +366,16 @@ def get_virtual_host_profile():
     return profile, ss_inbound
 
 
-def create_virtual_holder_host(remark_base, real_host_uuid, node, profile_uuid, inbound_uuid):
+def create_virtual_holder_host(vh_remark, real_host_uuid, node, profile_uuid, inbound_uuid):
     # Скрытый хост-держатель для device-route RU: не выбирается клиентом
     # напрямую (isHidden), существует только чтобы нести JSON-шаблон,
     # который инжектит по UUID видимый реальный хост (self-injection в
     # Remnawave запрещён — хост не может инжектить сам себя, поэтому нужен
     # отдельный объект). Профиль/инбаунд — тот же, что у самой ноды
     # (не decoy VirtualHost — тот только для авто-хостов WiFi/Mobile).
-    remark = f"{remark_base} (VH device-route RU)"[:40]
+    # Имя (vh_remark) передаётся уже готовым — обычный паттерн
+    # "{remark} (VH device-route RU)" или спец-имя для мост-нод (см. BRIDGE_VH_NAMES).
+    remark = vh_remark[:40]
     hosts = rw_get("/hosts")
     dup = next((h for h in hosts if h.get("remark") == remark), None)
     if dup:
@@ -665,10 +703,20 @@ def remove_node():
     if not real_host:
         warn(f"Хост {node['host_uuid']} не найден в Remnawave (уже удалён вручную?) — почищу только balancer.py/Prometheus")
     else:
-        vh_remark = f"{real_host.get('remark', '')} (VH device-route RU)"[:40]
-        virtual_host = next((h for h in hosts if h.get("remark") == vh_remark), None)
+        # Ищем VH-хост по совпадению inbound+address с реальным хостом, а не по
+        # паттерну remark — у мост-нод VH называется иначе (см. BRIDGE_VH_NAMES),
+        # а inbound/address у real+VH одной ноды всегда идентичны (проверено вживую).
+        real_inbound = real_host.get("inbound") or {}
+        virtual_host = next(
+            (h for h in hosts
+             if h["uuid"] != real_host["uuid"]
+             and h.get("address") == real_host.get("address")
+             and (h.get("inbound") or {}).get("configProfileUuid") == real_inbound.get("configProfileUuid")
+             and (h.get("inbound") or {}).get("configProfileInboundUuid") == real_inbound.get("configProfileInboundUuid")),
+            None,
+        )
         if not virtual_host:
-            warn(f"Скрытый хост-держатель «{vh_remark}» не найден — возможно, уже удалён")
+            warn(f"Скрытый хост-держатель для «{real_host.get('remark')}» не найден — возможно, уже удалён")
 
     template_uuid = virtual_host.get("xrayJsonTemplateUuid") if virtual_host else None
 
@@ -717,6 +765,45 @@ def remove_node():
     success(f"Нода {node['name']} полностью удалена")
     print("=" * 60)
     print()
+
+
+# ── Сортировка хостов в панели ────────────────────────────────────
+def reorder_hosts():
+    """Порядок отображения хостов в панели (viewPosition) — чисто
+    визуальная сортировка, на видимость/доступ клиентов не влияет
+    (это отдельно регулирует isHidden):
+      1. Авто-пул для дома (🏠)
+      2. Авто-пул для мобильного (📱)
+      3. Мосты (remark начинается с "МОСТ ДЛЯ")
+      4. Остальные видимые хосты
+      5. Скрытые хосты (isHidden) — обычные "(VH device-route RU)"
+    Относительный порядок внутри каждой группы сохраняется (устойчивая сортировка)."""
+    hosts = rw_get("/hosts")
+    hosts_by_pos = sorted(hosts, key=lambda h: h.get("viewPosition", 0))
+
+    home_remark = AUTO_POOL_HOSTS["BALANCER_WIFI"][0]
+    mobile_remark = AUTO_POOL_HOSTS["BALANCER_MOBILE"][0]
+
+    def bucket(h):
+        remark = h.get("remark") or ""
+        if remark == home_remark:
+            return 0
+        if remark == mobile_remark:
+            return 1
+        if remark.startswith("МОСТ ДЛЯ") or remark.startswith("МОСТ 🇷🇺"):
+            return 2
+        if not h.get("isHidden"):
+            return 3
+        return 4
+
+    ordered = sorted(hosts_by_pos, key=bucket)
+    payload = {"hosts": [{"uuid": h["uuid"], "viewPosition": i} for i, h in enumerate(ordered)]}
+    status, data = rw_request("POST", "/hosts/actions/reorder", payload)
+    if status != 200:
+        warn(f"Не удалось пересортировать хосты: HTTP {status} {data}")
+        return False
+    success("Хосты пересортированы в панели")
+    return True
 
 
 # ── Аудит: поиск осиротевших объектов ────────────────────────────
@@ -803,7 +890,19 @@ def onboard_one_node():
         warn("Не удалось однозначно определить интерфейс автоматически (NAT/несколько адресов на ноде?)")
         net_dev = ask_net_device()
 
-    remark = resolve_remark(node)
+    is_bridge = False
+    if node.get("countryCode") == "RU":
+        is_bridge = ask(
+            "Это мост-нода (RU — первый хоп, трафик уходит через другую страну)? (y/n)", "y"
+        ).lower() == "y"
+
+    if is_bridge:
+        bridge_target = ask_bridge_target()
+        remark = resolve_remark(node, default_override=bridge_target)
+        vh_remark = BRIDGE_VH_NAMES.get(pool_tag, f"МОСТ 🇷🇺 ({pool_tag})")
+    else:
+        remark = resolve_remark(node)
+        vh_remark = f"{remark} (VH device-route RU)"
 
     print()
     print("─" * 50)
@@ -812,13 +911,15 @@ def onboard_one_node():
     info(f"Пул:           {pool_tag}")
     info(f"Интерфейс:     {net_dev}")
     info(f"Имя хоста:     {remark}")
+    if is_bridge:
+        info(f"Мост:          да (скрытый хост будет назван «{vh_remark}»)")
     print("─" * 50)
     if ask("Создать хост и шаблон подписки? (y/n)", "y").lower() != "y":
         print("Отмена этой ноды.")
         return
 
     real_host = create_real_host(node, profile_uuid, inbound_uuid, remark, pool_tag)
-    virtual_host = create_virtual_holder_host(remark, real_host["uuid"], node, profile_uuid, inbound_uuid)
+    virtual_host = create_virtual_holder_host(vh_remark, real_host["uuid"], node, profile_uuid, inbound_uuid)
     template_json = build_subscription_template(real_host["uuid"])
     template_uuid = create_subscription_template(f"{remark}_Direct", template_json)
     attach_template_to_host(virtual_host["uuid"], template_uuid)
@@ -848,6 +949,8 @@ def main():
         if ask("Добавить ещё одну ноду? (y/n)", "n").lower() != "y":
             break
 
+    reorder_hosts()
+
     print()
     success("Готово")
     print()
@@ -861,5 +964,7 @@ if __name__ == "__main__":
         remove_node()
     elif "--audit" in sys.argv:
         audit()
+    elif "--sort" in sys.argv:
+        reorder_hosts()
     else:
         main()
