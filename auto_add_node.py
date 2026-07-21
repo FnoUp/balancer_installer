@@ -311,11 +311,16 @@ def ask_bridge_target():
 
 
 # ── hosts ──────────────────────────────────────────────────────
-def create_real_host(node, profile_uuid, inbound_uuid, remark, pool_tag):
-    # Видимый клиенту хост — обычная прямая точка входа на реальный
-    # инбаунд ноды. Тег пула ставим сразу при создании (не ждём первый
-    # цикл проверки здоровья в balancer.py) — нода сразу попадает в пул;
-    # дальше balancer.py сам снимает/возвращает тег по здоровью, как обычно.
+def create_real_host(node, profile_uuid, inbound_uuid, remark, pool_tag, is_hidden=True):
+    # Хост с прямой ссылкой на реальный инбаунд ноды — то, что реально
+    # тегирует и мониторит balancer.py по здоровью. НЕ показывается клиенту
+    # напрямую (is_hidden=True по умолчанию): self-инъекция в Remnawave
+    # запрещена (хост не может нести шаблон, который инжектит сам себя),
+    # поэтому маршрутизацию с RU-bypass несёт отдельный объект-держатель
+    # (create_virtual_holder_host) — именно ЕГО показывают клиенту.
+    # Тег пула ставим сразу при создании (не ждём первый цикл проверки
+    # здоровья в balancer.py) — нода сразу попадает в пул; дальше
+    # balancer.py сам снимает/возвращает тег по здоровью, как обычно.
     hosts = rw_get("/hosts")
     dup = next((h for h in hosts if h.get("remark") == remark), None)
     if dup:
@@ -335,6 +340,7 @@ def create_real_host(node, profile_uuid, inbound_uuid, remark, pool_tag):
         },
         "fingerprint": "firefox",
         "tags": [pool_tag],
+        "isHidden": is_hidden,
     }
     status, data = rw_request("POST", "/hosts", payload)
     if status not in (200, 201):
@@ -366,15 +372,17 @@ def get_virtual_host_profile():
     return profile, ss_inbound
 
 
-def create_virtual_holder_host(vh_remark, real_host_uuid, node, profile_uuid, inbound_uuid):
-    # Скрытый хост-держатель для device-route RU: не выбирается клиентом
-    # напрямую (isHidden), существует только чтобы нести JSON-шаблон,
-    # который инжектит по UUID видимый реальный хост (self-injection в
-    # Remnawave запрещён — хост не может инжектить сам себя, поэтому нужен
-    # отдельный объект). Профиль/инбаунд — тот же, что у самой ноды
-    # (не decoy VirtualHost — тот только для авто-хостов WiFi/Mobile).
-    # Имя (vh_remark) передаётся уже готовым — обычный паттерн
-    # "{remark} (VH device-route RU)" или спец-имя для мост-нод (см. BRIDGE_VH_NAMES).
+def create_virtual_holder_host(vh_remark, real_host_uuid, node, profile_uuid, inbound_uuid, is_hidden=False):
+    # Хост-держатель для device-route RU: несёт JSON-шаблон, который
+    # инжектит по UUID реальный хост (create_real_host) — self-инъекция в
+    # Remnawave запрещена (хост не может инжектить сам себя), поэтому
+    # разделены на два объекта. ЭТОТ объект показывается клиенту
+    # (is_hidden=False по умолчанию) — именно на нём реально работает
+    # RU-bypass маршрутизация; голый create_real_host без шаблона её не
+    # несёт вообще (проверено вживую 2026-07 — self-инъекция ломает outbound
+    # "proxy", а без шаблона нет ни одного RU-правила). Профиль/инбаунд —
+    # тот же, что у самой ноды (не decoy VirtualHost — тот только для
+    # авто-хостов WiFi/Mobile).
     remark = vh_remark[:40]
     hosts = rw_get("/hosts")
     dup = next((h for h in hosts if h.get("remark") == remark), None)
@@ -392,16 +400,16 @@ def create_virtual_holder_host(vh_remark, real_host_uuid, node, profile_uuid, in
             "configProfileInboundUuid": inbound_uuid,
         },
         "fingerprint": "firefox",
-        "isHidden": True,
+        "isHidden": is_hidden,
     }
     status, data = rw_request("POST", "/hosts", payload)
     if status not in (200, 201):
-        fail(f"POST /hosts (скрытый хост) -> HTTP {status}: {data}")
+        fail(f"POST /hosts (хост-держатель) -> HTTP {status}: {data}")
     host = data.get("response", data)
     if "uuid" not in host:
-        fail(f"POST /hosts (скрытый хост) вернул неожиданный формат ответа: {host}")
+        fail(f"POST /hosts (хост-держатель) вернул неожиданный формат ответа: {host}")
     _created["virtual-host"] = host["uuid"]
-    success(f"Скрытый хост-держатель создан: {host['uuid']} ({remark})")
+    success(f"Хост-держатель создан: {host['uuid']} ({remark})")
     return host
 
 
@@ -573,19 +581,23 @@ def self_check(real_host_uuid, virtual_host_uuid, template_uuid, pool_tag):
     if not real:
         warn("Самопроверка: реальный хост не находится через GET /hosts")
         ok = False
-    elif pool_tag not in (real.get("tags") or []):
-        warn(f"Самопроверка: у реального хоста нет тега пула {pool_tag}")
-        ok = False
+    else:
+        if pool_tag not in (real.get("tags") or []):
+            warn(f"Самопроверка: у реального хоста нет тега пула {pool_tag}")
+            ok = False
+        if not real.get("isHidden"):
+            warn("Самопроверка: реальный хост-держатель тега не помечен isHidden (должен быть скрыт от клиента)")
+            ok = False
 
     if not virt:
-        warn("Самопроверка: скрытый хост не находится через GET /hosts")
+        warn("Самопроверка: видимый хост-держатель шаблона не находится через GET /hosts")
         ok = False
     else:
-        if not virt.get("isHidden"):
-            warn("Самопроверка: скрытый хост не помечен isHidden")
+        if virt.get("isHidden"):
+            warn("Самопроверка: хост-держатель шаблона помечен isHidden (должен быть видим клиенту, иначе маршрутизация не работает)")
             ok = False
         if virt.get("xrayJsonTemplateUuid") != template_uuid:
-            warn("Самопроверка: у скрытого хоста не привязан созданный шаблон подписки")
+            warn("Самопроверка: у хоста-держателя не привязан созданный шаблон подписки")
             ok = False
 
     status, data = rw_request("GET", "/subscription-templates")
@@ -776,7 +788,7 @@ def reorder_hosts():
       2. Авто-пул для мобильного (📱)
       3. Мосты (remark начинается с "МОСТ ДЛЯ")
       4. Остальные видимые хосты
-      5. Скрытые хосты (isHidden) — обычные "(VH device-route RU)"
+      5. Скрытые хосты (isHidden) — реальные хосты-держатели тега, "(VH)"
     Относительный порядок внутри каждой группы сохраняется (устойчивая сортировка)."""
     hosts = rw_get("/hosts")
     hosts_by_pos = sorted(hosts, key=lambda h: h.get("viewPosition", 0))
@@ -896,13 +908,20 @@ def onboard_one_node():
             "Это мост-нода (RU — первый хоп, трафик уходит через другую страну)? (y/n)", "y"
         ).lower() == "y"
 
+    # visible_remark — имя, которое реально видит клиент и через которое
+    # работает RU-bypass (несёт JSON-шаблон). real_remark — скрытый
+    # объект-держатель прямой ссылки на инбаунд ноды (то, что тегирует и
+    # мониторит balancer.py) — self-инъекция запрещена, поэтому он не может
+    # одновременно быть видимым и нести собственный шаблон (проверено
+    # вживую 2026-07: маршрутизация есть, но пропадает outbound "proxy").
     if is_bridge:
         bridge_target = ask_bridge_target()
-        remark = resolve_remark(node, default_override=bridge_target)
-        vh_remark = BRIDGE_VH_NAMES.get(pool_tag, f"МОСТ 🇷🇺 ({pool_tag})")
+        real_remark = f"{resolve_remark(node, default_override=bridge_target)} (VH)"
+        visible_remark = BRIDGE_VH_NAMES.get(pool_tag, f"МОСТ 🇷🇺 ({pool_tag})")
     else:
-        remark = resolve_remark(node)
-        vh_remark = f"{remark} (VH device-route RU)"
+        visible_remark = resolve_remark(node)
+        real_remark = f"{visible_remark} (VH)"
+    remark = visible_remark  # используется дальше для имени шаблона/tg_name/логов
 
     print()
     print("─" * 50)
@@ -910,16 +929,17 @@ def onboard_one_node():
     info(f"Config-profile: {profile_uuid}  (уже настроен, не создаётся заново)")
     info(f"Пул:           {pool_tag}")
     info(f"Интерфейс:     {net_dev}")
-    info(f"Имя хоста:     {remark}")
-    if is_bridge:
-        info(f"Мост:          да (скрытый хост будет назван «{vh_remark}»)")
+    info(f"Имя хоста (видимое клиенту): {visible_remark}")
+    info(f"Скрытый хост-держатель тега: {real_remark}")
     print("─" * 50)
     if ask("Создать хост и шаблон подписки? (y/n)", "y").lower() != "y":
         print("Отмена этой ноды.")
         return
 
-    real_host = create_real_host(node, profile_uuid, inbound_uuid, remark, pool_tag)
-    virtual_host = create_virtual_holder_host(vh_remark, real_host["uuid"], node, profile_uuid, inbound_uuid)
+    real_host = create_real_host(node, profile_uuid, inbound_uuid, real_remark, pool_tag, is_hidden=True)
+    virtual_host = create_virtual_holder_host(
+        visible_remark, real_host["uuid"], node, profile_uuid, inbound_uuid, is_hidden=False
+    )
     template_json = build_subscription_template(real_host["uuid"])
     template_uuid = create_subscription_template(f"{remark}_Direct", template_json)
     attach_template_to_host(virtual_host["uuid"], template_uuid)
